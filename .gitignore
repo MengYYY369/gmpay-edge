@@ -9,3 +9,5 @@ dist-ssr
 .output
 .vinxi
 __unconfig*
+.codegraph
+.vscode
