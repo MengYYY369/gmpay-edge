@@ -2,7 +2,8 @@
 
 简体中文 · [English](../en-US/DEPLOYMENT.md)
 
-本清单用于部署一个单租户 GMPay Edge 实例。运营人员统一使用 `/admin`；商户只通过
+本清单用于将一个单租户 GMPay Edge 实例部署到 Cloudflare Workers 或 Node/Nitro。
+运营人员统一使用 `/admin`；商户只通过
 带签名的 GMPay 主协议或其 EPay 边界适配接入。
 
 ## 部署方式
@@ -11,11 +12,11 @@
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/GMWalletApp/gmpay-edge)
 
-引导流程会复刻仓库并配置 Workers Builds，使用按钮时源仓库必须公开。Build command 配置为 `bun run build`，Deploy command 配置为 `wrangler deploy`。构建命令会创建或复用具名 D1、R2 和 Queue 资源，应用 D1 基线后再生成 Vite 产物；部署时 Cloudflare 关联 `wrangler.jsonc` 中不含账号 ID 的绑定，整个过程不改写源码配置。部署完成后访问 Worker 地址的 `/install`。
+引导流程会复刻仓库并配置 Workers Builds，使用按钮时源仓库必须公开。Build command 配置为 `bun run build`，Deploy command 配置为 `wrangler deploy`。构建命令会精确复用同名 D1、KV、R2 和 Queue，只创建缺失资源；应用 D1 基线后，生成包含已解析 D1/KV ID 的 Vite 产物，整个过程不改写可移植的源码 `wrangler.jsonc`。部署完成后访问 Worker 地址的 `/install`。
 
 ### Wrangler CLI
 
-完成 Wrangler 登录后执行 package 部署命令。`predeploy` Hook 会创建或复用具名 D1、R2 和 Queue 资源，通过 `DB` 应用 D1 基线，并在发布前生成 Vite 产物：
+完成 Wrangler 登录后执行 package 部署命令。`predeploy` Hook 会精确复用同名 D1、KV、R2 和 Queue，只创建缺失资源；随后应用 D1 基线，并在发布前生成已解析绑定的 Vite 产物：
 
 ```bash
 bun install
@@ -26,9 +27,88 @@ bun run deploy
 必要时可以先执行 `bunx wrangler d1 create gmpay-edge`，再执行
 `bun run db:migrate:remote` 手动准备 D1；生成的数据库 ID 不写入可移植源码配置。
 
+### Node 与 Docker
+
+公开的 [GHCR Package](https://github.com/orgs/GMWalletApp/packages/container/package/gmpay-edge)
+支持 `linux/amd64` 与 `linux/arm64`，无需登录 Registry。
+
+| 标签 | 推荐用途 |
+| --- | --- |
+| `latest` | 最新稳定版 |
+| `alpha` | 用于测试的最新预发布版 |
+| `1.0.0` | 用于可复现部署的固定版本 |
+
+#### Docker Compose
+
+将以下内容保存为 `compose.yml`：
+
+```yaml
+services:
+  gmpay-edge:
+    image: ghcr.io/gmwalletapp/gmpay-edge:latest
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      GMPAY_DATA_DIR: /var/lib/gmpay
+    volumes:
+      - gmpay-data:/var/lib/gmpay
+
+volumes:
+  gmpay-data:
+```
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+需要测试预发布版时，启动前将 `latest` 改成 `alpha`。
+
+#### Docker 命令
+
+无法使用 Compose 时，可以直接运行容器：
+
+```bash
+docker volume create gmpay-data
+docker run --detach --name gmpay-edge --restart unless-stopped \
+  --publish 3000:3000 \
+  --env GMPAY_DATA_DIR=/var/lib/gmpay \
+  --volume gmpay-data:/var/lib/gmpay \
+  ghcr.io/gmwalletapp/gmpay-edge:latest
+```
+
+#### 首次安装
+
+等待 `GET /healthz` 成功后，通过公网地址打开 `/install`。创建首位 root 用户前，
+确认检测到的地址和 Allowed Hosts。应用、安全和邮件设置均在后台维护，不要将其
+添加为容器环境变量。
+
+`GMPAY_DATA_DIR` 指向持久化目录，其中包含 SQLite、上传文件、私有对象、队列状态和
+全部运行数据。更新或重新创建容器时，必须备份并保留该具名卷。
+
+#### 常用命令
+
+使用以下命令检查和维护 Compose 部署：
+
+```bash
+curl --fail http://127.0.0.1:3000/healthz
+docker compose ps
+docker compose logs --follow gmpay-edge
+docker compose pull
+docker compose up -d
+```
+
+最后两条命令会更新所选标签并重新创建容器，同时保留具名卷。
+
+从源码构建 Node 产物使用 `bun run build:node`。Workers 命令保持完全不变，继续
+使用 Cloudflare Vite 适配器。备份、恢复和 D1/R2 迁入请遵循
+[Node 数据运维](NODE_DATA_OPERATIONS.md)，并使用仓库维护的 `data` package script
+及其 `backup`、`restore` 和 `import-cloudflare` 子命令。
+
 ## Cloudflare 资源
 
-- [ ] 如需启用密码找回，在 Cloudflare Email Service 中启用发件域名，为已部署 Worker 添加名为 `AUTH_EMAIL` 的 `send_email` 绑定，并在“后台 → 系统设置 → 认证配置”保存发件地址。未配置这一可选绑定时，登录页仍统一返回通用响应。
+- [ ] 在“后台 → 邮件配置”至少配置一个服务商。使用 Cloudflare Email 时，将 Email Routing 绑定为 `EMAIL` 并确认该 Workers 专用类型出现；实际发送找回邮件并确认 15 分钟链接可用。投递不可用时登录页仍统一返回通用响应。
 - [ ] 确认 Workers 构建创建或复用 `gmpay-edge` D1 数据库，并将其关联为 `DB`。
 - [ ] 完成一次构建，确认 Wrangler 的 `assets.directory` 发布 `dist/client`；静态文件由 Cloudflare 平台资产处理提供，不向应用代码暴露 `ASSETS` 绑定，应用和 API 路由继续进入 Worker。
 - [ ] 确认部署日志读取 `dist/server/wrangler.json`，其中 `main` 为 `index.js` 且 `no_bundle` 为 `true`；Wrangler 不得重新打包 `src/server-entry.ts`，也不得再出现 `#tanstack-router-entry` 或 `#tanstack-start-entry` 无法解析。
@@ -48,11 +128,33 @@ bun run deploy
 - [ ] 在启用入账前完成一次 Alchemy 影子模式低价值演练；检查供应商事件记录，演练一次符合条件的手动重试，并确认重复或内容变化的投递不能创建额外支付事件。
 - [ ] 保持 Worker 崩溃时的 Queue 重试/DLQ 策略；应用级 Webhook 尝试由 D1 独立持久化和调度。
 - [ ] 确认 `bun run deploy` 创建或复用 `gmpay-edge`，并在发布前应用 D1 基线；`bun run db:migrate:remote` 仅用于明确的“仅数据库”操作。
-- [ ] 完成 `/install`，生成认证/签名值和默认支付目录，将当前 Origin 写入应用地址与 Allowed Hosts，并确认自动登录后台。
+- [ ] 完成 `/install`，生成认证/签名值和默认支付目录，确认检测到的 Origin，将其写入应用地址与 Allowed Hosts，并确认自动登录后台。
 - [ ] 打开“忘记密码”，接收 15 分钟一次性链接并完成重置，确认旧 Session 无法继续认证。
 - [ ] 在“后台 → 系统设置 → 认证配置 / 密钥管理”中核对生产 HTTPS Origin，并随 D1 安全备份 `runtime.better_auth_secret`。
 - [ ] 按[支付配置](PAYMENT_METHODS.md)配置计划启用的支付方式；交易所只使用只读凭证，并核对资产标识和精度。
 - [ ] 配置加密资产与法币汇率同步；在各自设置弹窗中先执行一次“立即执行”，核对原始/最终汇率，再确认每分钟 Cron 遵循每类的自动同步开关和保存周期。
+
+## Node 资源
+
+- [ ] 确认容器以非 root 用户运行，持久化目录仅允许预期的宿主机/容器身份写入。
+- [ ] 安装并完成测试上传/订单后，确认卷中包含 `gmpay.sqlite`、私有对象和可靠队列状态。
+- [ ] 配置 Node 支持的邮件服务商并测试密码找回；确认服务商列表与 Workers 一致，容器环境中没有邮件 Secret。
+- [ ] 重启容器，确认排队中的 Webhook/支付任务和定时任务恢复，且不会重复入账或投递。
+- [ ] 停止容器，使用 `bun run data -- backup` 备份到外部路径，再用 `bun run data -- restore` 恢复到新数据目录；校验清单、SQLite 完整性、migration 校验和、登录及私有对象访问。
+- [ ] 从 Workers 迁移时，针对明确的 D1 SQL 与可选 R2 导出路径执行 `bun run data -- import-cloudflare`；只导入全新或空目标，随后重新完成签名订单和回调验收。
+
+## 自动发布
+
+semantic-release 会在两个发布通道的质量门通过后运行。`alpha` 从
+`1.0.0-alpha.1` 开始，只发布完整版本和滚动 `alpha` 容器标签；验证后合并到
+`main`，再发布稳定 `1.0.0` 以及 major、minor、`latest` 标签。它会更新
+`package.json` 和 `bun.lock`、创建带自动生成说明的 GitHub Release 与 tag，再调用
+独立的 Docker smoke 与多架构发布工作流。原生 x64 与 Arm64 runner 会并行构建并
+smoke 各自平台镜像，再组装发布 manifest。稳定镜像及其 provenance 发布成功后，
+匹配的 alpha GitHub 预发布记录、远程 Git tag 与 GHCR 镜像版本会自动删除。
+
+`gmpay-edge` GHCR Package 已公开；发布验收只需验证未登录拉取，无需再执行一次性
+可见性修改。
 
 ## 发布门槛
 
@@ -60,8 +162,11 @@ bun run deploy
 - [ ] `bun run test`
 - [ ] `bun run check`
 - [ ] `bun run build`
+- [ ] `bun run build:node`
 - [ ] 打开登录页，确认未初始化部署会引导到 root 用户初始化。
 - [ ] 创建并启用计划使用的支付方式、接入配置和收款方式；开发模拟能力不得误用于生产。
 - [ ] 验证零绑定的 `GET/HEAD /healthz`、详细 `/status`、初始化、登录，以及目标支付通道上的一笔签名 GMPay 完整订单。
 - [ ] 确认商户回调目标为公共 HTTPS；供应商与 Telegram 入站路径校验各自签名；GMPay/EPay 出站签名与文档一致。
 - [ ] 确认仓库未跟踪 `.dev.vars`、私钥、助记词、商户 Secret 或 Cloudflare Token。
+- [ ] 对选定生产运行时执行 smoke；发布时从 GitHub Release 核对 GHCR 镜像 digest 与两种架构。
+- [ ] 验证无需登录即可拉取公开的 GHCR 镜像。

@@ -5,20 +5,21 @@
 [简体中文](README.zh-CN.md) · English
 
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-3DA639.svg?style=flat-square)](LICENSE)
-[![Runtime: Cloudflare Workers](https://img.shields.io/badge/runtime-Cloudflare%20Workers-F38020.svg?style=flat-square&logo=cloudflare&logoColor=white)](https://workers.cloudflare.com/)
+[![Runtimes: Workers + Node](https://img.shields.io/badge/runtimes-Workers%20%2B%20Node-F38020.svg?style=flat-square)](docs/en-US/DEPLOYMENT.md)
 [![Bun](https://img.shields.io/badge/toolchain-Bun-000000.svg?style=flat-square&logo=bun&logoColor=white)](https://bun.sh/)
 [![TypeScript](https://img.shields.io/badge/language-TypeScript-3178C6.svg?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![React 19](https://img.shields.io/badge/React-19-61DAFB.svg?style=flat-square&logo=react&logoColor=white)](https://react.dev/)
 [![TanStack Start](https://img.shields.io/badge/TanStack-Start-FF4154.svg?style=flat-square&logo=reactquery&logoColor=white)](https://tanstack.com/start)
-[![Cloudflare D1](https://img.shields.io/badge/data-Cloudflare%20D1-F38020.svg?style=flat-square&logo=cloudflare&logoColor=white)](https://developers.cloudflare.com/d1/)
+[![Data: D1 + SQLite](https://img.shields.io/badge/data-D1%20%2B%20SQLite-3DA639.svg?style=flat-square)](docs/en-US/DEPLOYMENT.md)
 [![Better Auth](https://img.shields.io/badge/auth-Better%20Auth-000000.svg?style=flat-square)](https://www.better-auth.com/)
 [![Vitest](https://img.shields.io/badge/tests-Vitest-6E9F18.svg?style=flat-square&logo=vitest&logoColor=white)](https://vitest.dev/)
 [![Locales: 6](https://img.shields.io/badge/locales-6-7C3AED.svg?style=flat-square)](project.inlang/settings.json)
 
 GMPay Edge is a self-hosted, single-tenant cryptocurrency payment gateway for
-Cloudflare Workers. One deployment provides signed merchant APIs, a responsive
-checkout, payment operations, dynamic role-based access control, durable
-Webhook delivery, scheduled processing, and Telegram automation.
+Cloudflare Workers or a Node/Nitro Docker container. One deployment provides
+signed merchant APIs, a responsive checkout, payment operations, dynamic
+role-based access control, durable Webhook delivery, scheduled processing, and
+Telegram automation.
 
 It is designed for operators who want to retain control of their payment
 infrastructure while using read-only chain, exchange, and wallet integrations.
@@ -45,7 +46,7 @@ the protected `/admin` application.
 - Protect administration with Better Auth, optional TOTP, and dynamic multi-role RBAC,
   including a protected built-in `root` role.
 - Run payment scanning, expiry, cleanup, connection health, and rate sync through
-  Cloudflare Queues and Cron Triggers.
+  durable queues and scheduled jobs on either supported runtime.
 - Operate Telegram Bots through grammY with Inline orders, public commands, and
   unified private, group, and channel notification subscriptions.
 - Provide a responsive React 19 admin console, checkout, public status pages,
@@ -84,7 +85,7 @@ flowchart LR
     Admin["Admin"]
     TelegramUser["Telegram user"]
 
-    subgraph Worker["Single GMPay Edge Worker"]
+    subgraph Runtime["Single GMPay Edge deployment"]
         direction LR
         GMPay["GMPay boundary<br/>HMAC-SHA256"]
         EPay["EPay compatibility boundary<br/>legacy MD5"]
@@ -100,7 +101,8 @@ flowchart LR
         TelegramBot --> Core
     end
 
-    Cloudflare["Cloudflare services<br/>D1 · KV · R2 · Queues · Cron"]
+    Cloudflare["Workers services<br/>D1 · KV · R2 · Queues · Cron"]
+    Node["Node services<br/>SQLite · local objects · durable queues · scheduler"]
     Providers["Read-only payment providers<br/>Chains · Binance · OKX · OKPay"]
     Callbacks["Merchant Webhook endpoints<br/>GMPay HMAC-SHA256 · EPay MD5"]
 
@@ -110,17 +112,19 @@ flowchart LR
     Admin --> AdminUI
     TelegramUser --> TelegramBot
     Core <--> Cloudflare
+    Core <--> Node
     Core <--> Providers
     Core --> Callbacks
 ```
 
-One Worker owns every product surface and the shared order and payment core.
+One Worker or Node container owns every product surface and the shared order and
+payment core.
 GMPay HMAC-SHA256 and legacy EPay MD5 terminate at explicit protocol boundaries,
 then use the same order service, state machine, checkout, and Webhook pipeline.
-Outbound callbacks retain the originating protocol's signature format. D1 is
-authoritative; KV provides validated versioned caches and R2 stores private
-artifacts. Cron and Queues move payment scans and Webhook retries outside
-synchronous requests. Payment adapters remain read-only.
+Outbound callbacks retain the originating protocol's signature format. Each
+runtime keeps its database authoritative, uses its own cache and private object
+adapter, and moves scans and Webhook retries outside synchronous requests.
+Payment adapters remain read-only.
 
 ## Deploy to Cloudflare Workers
 
@@ -151,10 +155,10 @@ bun run deploy
 If D1 must be prepared manually, run `bunx wrangler d1 create gmpay-edge`
 followed by `bun run db:migrate:remote`. Do not commit the generated database ID.
 
-The `predeploy` hook creates or reuses the named D1, R2, and Queue resources,
-applies the D1 baseline through `DB`, and builds the Worker before publication.
-The build script never writes account-specific IDs or temporary values to
-`wrangler.jsonc`.
+The `predeploy` hook reuses the exact named D1, KV, R2, and Queue resources when
+they already exist and creates only missing resources. It applies the D1
+baseline and injects resolved D1/KV IDs into the generated deployment artifact
+before publication; account-specific IDs are never written to `wrangler.jsonc`.
 
 The deployment declares these bindings:
 
@@ -165,6 +169,100 @@ The deployment declares these bindings:
 | `FILES` | R2 | Private payment-review evidence and generated exports |
 | `PAYMENT_QUEUE` | Queues | Asynchronous payment scanning |
 | `WEBHOOK_QUEUE` | Queues | Asynchronous merchant Webhook delivery |
+
+The existing Workers workflow is unchanged: `bun run build`, `bun run predeploy`,
+and `bun run deploy` continue to use the Cloudflare Vite adapter. The Node build
+is separate and does not alter Workers output.
+
+## Deploy with Node and Docker
+
+The public [GHCR package](https://github.com/orgs/GMWalletApp/packages/container/package/gmpay-edge)
+supports `linux/amd64` and `linux/arm64`. It is public, so no registry login is
+required.
+
+Choose the image tag that fits your deployment:
+
+| Tag | Use |
+| --- | --- |
+| `latest` | Recommended stable release |
+| `alpha` | Latest prerelease for testing |
+| `1.0.0` | A fixed release that will not change unexpectedly |
+
+### Docker Compose (recommended)
+
+Save the following as `compose.yml`:
+
+```yaml
+services:
+  gmpay-edge:
+    image: ghcr.io/gmwalletapp/gmpay-edge:latest
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      GMPAY_DATA_DIR: /var/lib/gmpay
+    volumes:
+      - gmpay-data:/var/lib/gmpay
+
+volumes:
+  gmpay-data:
+```
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+To test a prerelease, change `latest` to `alpha` in the `image` line before
+starting the service.
+
+### Docker command
+
+If you do not use Compose, run the same service directly:
+
+```bash
+docker volume create gmpay-data
+docker run --detach --name gmpay-edge --restart unless-stopped \
+  --publish 3000:3000 \
+  --env GMPAY_DATA_DIR=/var/lib/gmpay \
+  --volume gmpay-data:/var/lib/gmpay \
+  ghcr.io/gmwalletapp/gmpay-edge:latest
+```
+
+Open `http://your-host:3000/install` after the container starts. Confirm the
+public address and Allowed Hosts, then create the first root user. Application,
+security, and email settings are managed in the admin interface; they do not
+need additional container environment variables.
+
+The named volume stores the database, uploaded files, queue state, and all other
+runtime data. Keep it when updating or recreating the container. Check the
+service with `curl --fail http://127.0.0.1:3000/healthz`; view Compose logs with
+`docker compose logs --follow gmpay-edge`. Update with:
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+See the [deployment guide](docs/en-US/DEPLOYMENT.md) for production checks and
+[Node data operations](docs/en-US/NODE_DATA_OPERATIONS.md) for backup, restore,
+and Cloudflare migration.
+
+## Releases and container images
+
+Updates to `alpha` are prereleased by semantic-release as `1.0.0-alpha.1`,
+`alpha.2`, and so on using Conventional Commits. Alpha containers receive the
+exact version and moving `alpha` tags only. After testing, merge into `main` to
+publish stable `1.0.0`; stable containers also receive major, minor, and
+`latest` tags. Each release updates `package.json` and `bun.lock`, creates a
+GitHub Release with generated notes and a tag, then calls the independent Docker
+smoke and multi-architecture GHCR workflow. Native x64 and Arm64 runners build
+and smoke-test in parallel before publishing the combined manifest. After a
+stable publish, matching alpha GitHub prereleases, Git tags, and GHCR image
+versions are removed automatically.
+
+The GHCR package is public, so release and prerelease images support
+unauthenticated pulls.
 
 ## Keep a fork synchronized
 
@@ -202,13 +300,13 @@ Wrangler-managed local bindings; it does not apply migrations to remote D1.
 Open <http://localhost:3000/install> on the first run. Installation creates the
 first user, the protected `root` role, runtime secrets, payment defaults, four
 public Telegram commands with six-locale message content, and Telegram defaults.
-The current Origin is stored as the application URL and
+The detected Origin must be confirmed and is stored as the application URL and
 an Allowed Host, then the new root user is signed in automatically. Installation
 does not create a Telegram Bot or call Telegram.
 
-Password recovery is available from the sign-in page. For delivery, add a
-Cloudflare Email Service `send_email` binding named `AUTH_EMAIL`, then save its
-onboarded sender address under **Admin → System settings → Authentication**.
+Password recovery is available from the sign-in page. Configure and order one or
+more providers under the top-level **Admin → Email delivery** page. Both
+runtimes show the same provider types and ordered fallback behavior.
 
 After installation:
 
@@ -263,13 +361,13 @@ documented in the [Merchant API guide](docs/en-US/MERCHANT_API.md).
 
 | Area | Technology |
 | --- | --- |
-| Runtime | Cloudflare Workers |
+| Runtime | Cloudflare Workers or Node/Nitro Docker |
 | Application | React 19, TanStack Start/Router/Query/Table/Form |
 | UI | Tailwind CSS 4, shadcn/Radix |
 | Authentication | Better Auth |
 | Authorization | Project-owned dynamic RBAC with permission bit masks |
-| Data | Cloudflare D1, Drizzle ORM |
-| Edge services | KV, R2, Queues, Cron Triggers |
+| Data | Cloudflare D1 or SQLite, Drizzle ORM |
+| Runtime services | KV/R2/Queues/Cron or local cache/objects/durable queues/scheduler |
 | Telegram | grammY, Telegram Bot API |
 | Internationalization | ParaglideJS |
 | Tooling | Bun, strict TypeScript, Vitest, Biome, Wrangler |
@@ -286,7 +384,11 @@ bun run typecheck
 bun run test
 bun run check
 bun run build
+bun run build:node
 ```
+
+Run `bun run hooks:install` once per clone to enable the local Lefthook
+Conventional Commit check. Its commitlint policy is declared in `package.json`.
 
 Use `bun run db:generate` only for an intentional Drizzle schema change and
 review the generated migration. `src/paraglide` is generated by the Vite
@@ -300,6 +402,7 @@ bun run typecheck
 bun run test
 bun run check
 bun run build
+bun run build:node
 ```
 
 Tests are organized under `tests/unit`, `tests/integration`, `tests/security`,
@@ -312,6 +415,7 @@ deployer-owned infrastructure during production acceptance.
 | Topic | Documentation |
 | --- | --- |
 | Deployment and production sign-off | [Deployment checklist](docs/en-US/DEPLOYMENT.md) |
+| Node backup, restore, and Cloudflare import | [Node data operations](docs/en-US/NODE_DATA_OPERATIONS.md) |
 | Cloudflare free-tier capacity and optimization | [Free-tier audit](docs/en-US/CLOUDFLARE_FREE_TIER.md) |
 | Merchant requests, signatures, errors, and EPay | [Merchant API](docs/en-US/MERCHANT_API.md) |
 | Provider configuration and receiving methods | [Payment methods](docs/en-US/PAYMENT_METHODS.md) |
@@ -333,14 +437,14 @@ deployer-owned infrastructure during production acceptance.
   are encrypted before storage with their configured application encryption
   keys. They are revealed only at creation or rotation and resolved server-side
   when required.
-- Runtime settings are stored in D1. Runtime secret values are returned only to
+- Runtime settings are stored in the authoritative database. Runtime secret values are returned only to
   administrators with `settings:read`, rendered in password fields, and
   preserved when an update submits an empty value.
 - Better Auth owns passwords, sessions, and optional TOTP. Configure Allowed
   Hosts, HTTPS, Origin and CSRF validation, rate limits, and email password
   recovery before production use. When TOTP is enabled, acknowledge and retain
   its recovery codes.
-- Back up D1 and the runtime configuration before upgrades. Replacing
+- Back up D1 or the complete Node data directory before upgrades. Replacing
   `runtime.better_auth_secret` invalidates existing authentication material.
 - Callback destinations, provider responses, uploads, Queue messages, and KV
   values are untrusted boundaries. Production acceptance must include SSRF,

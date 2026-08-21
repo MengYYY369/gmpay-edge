@@ -36,6 +36,7 @@ type OrderForSelection = {
 	current_asset_code: string;
 	current_network: string;
 	current_network_name: string;
+	current_receiving_method_name: string;
 	current_rail_kind: "chain" | "exchange" | "wallet" | "";
 	receiving_method_id: string | null;
 	payment_count: number;
@@ -55,6 +56,7 @@ export async function listCheckoutPaymentOptions(
 			options: [
 				{
 					receivingMethodId: order.receiving_method_id,
+					receivingMethodName: order.current_receiving_method_name,
 					paymentMethodId: "",
 					asset: order.current_asset_code,
 					network: order.current_network,
@@ -67,7 +69,8 @@ export async function listCheckoutPaymentOptions(
 		};
 	const rows = await db
 		.prepare(
-			`SELECT rm.id AS receiving_method_id, a.id AS payment_method_id,
+			`SELECT rm.id AS receiving_method_id, rm.name AS receiving_method_name,
+			 a.id AS payment_method_id,
 			 a.code, a.decimals, rm.min_amount_minor, rm.max_amount_minor,
 			 a.rail_code AS network, pr.name AS network_name, pr.kind AS rail_kind
 			 FROM receiving_methods rm
@@ -83,6 +86,7 @@ export async function listCheckoutPaymentOptions(
 		)
 		.all<{
 			receiving_method_id: string;
+			receiving_method_name: string;
 			payment_method_id: string;
 			code: string;
 			decimals: number;
@@ -92,16 +96,18 @@ export async function listCheckoutPaymentOptions(
 			min_amount_minor: string | null;
 			max_amount_minor: string | null;
 		}>();
-	const orderAmountUsdMinor = rows.results.some(
+	const limitsRequireRate = rows.results.some(
 		(method) =>
 			method.min_amount_minor !== null || method.max_amount_minor !== null,
-	)
+	);
+	const orderAmountUsdMinor = limitsRequireRate
 		? await quoteUsdAmountMinor(db, {
 				amount: order.amount,
 				currency: order.currency,
 			})
 		: null;
 	const options = [];
+	let quoteUnavailable = false;
 	for (const asset of rows.results) {
 		if (
 			!isWithinReceivingLimits(
@@ -118,9 +124,13 @@ export async function listCheckoutPaymentOptions(
 				paymentAsset: asset.code,
 				assetDecimals: asset.decimals,
 			});
-			if (!quote) continue;
+			if (!quote) {
+				quoteUnavailable = true;
+				continue;
+			}
 			options.push({
 				receivingMethodId: asset.receiving_method_id,
+				receivingMethodName: asset.receiving_method_name,
 				paymentMethodId: asset.payment_method_id,
 				asset: asset.code,
 				network: asset.network,
@@ -130,6 +140,7 @@ export async function listCheckoutPaymentOptions(
 				current: false,
 			});
 		} catch {
+			quoteUnavailable = true;
 			// A malformed or unavailable quote excludes only this receiving method.
 		}
 	}
@@ -142,6 +153,13 @@ export async function listCheckoutPaymentOptions(
 			order.payment_count === 0 &&
 			order.pending_review_count === 0,
 		options,
+		unavailableReason:
+			options.length > 0
+				? null
+				: quoteUnavailable ||
+						(limitsRequireRate && orderAmountUsdMinor === null)
+					? ("rate_unavailable" as const)
+					: ("payment_method_unavailable" as const),
 	};
 }
 
@@ -332,6 +350,7 @@ async function readOrder(db: D1Database, id: string) {
 			 COALESCE(ops.asset_code, a.code, '') AS current_asset_code,
 			 COALESCE(ops.rail_code, a.rail_code, '') AS current_network,
 			 COALESCE(rail.name, ops.rail_code, a.rail_code, '') AS current_network_name,
+			 COALESCE(ops.receiving_method_name, '') AS current_receiving_method_name,
 			 COALESCE(ops.rail_kind, rail.kind, '') AS current_rail_kind,
 			 ops.receiving_method_id,
 			 (SELECT COUNT(*) FROM order_payments op WHERE op.order_id = o.id) AS payment_count,
