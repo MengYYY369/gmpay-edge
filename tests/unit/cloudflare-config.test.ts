@@ -55,6 +55,19 @@ describe("Cloudflare deployment contract", () => {
 			join(fixtureDirectory, "wrangler.jsonc"),
 			await readFile(new URL("../../wrangler.jsonc", import.meta.url), "utf8"),
 		);
+		const packageJson = JSON.parse(
+			await readFile(new URL("../../package.json", import.meta.url), "utf8"),
+		) as { scripts?: Record<string, string> };
+		await writeFile(
+			join(fixtureDirectory, "package.json"),
+			JSON.stringify({
+				type: "module",
+				scripts: {
+					predeploy: packageJson.scripts?.predeploy,
+					deploy: packageJson.scripts?.deploy,
+				},
+			}),
+		);
 		const fakeCommand = `#!/usr/bin/env bun
 import { appendFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
@@ -76,7 +89,7 @@ if (tool === "wrangler" && args[0] === "kv" && args[1] === "namespace" && args[2
 	console.log(JSON.stringify(exists ? [{ id: "cache-id", title: "gmpay-edge-cache" }] : []));
 }
 if (tool === "wrangler" && args[0] === "kv" && args[1] === "namespace" && args[2] === "create") writeFileSync(cacheMarker, "");
-if (tool === "vite" && process.env.WORKERS_CI === "1") {
+if (tool === "vite" && args[0] === "build") {
 	mkdirSync(join(process.cwd(), "dist/server"), { recursive: true });
 	writeFileSync(join(process.cwd(), "dist/server/wrangler.json"), JSON.stringify({ d1_databases: [{ binding: "DB" }], kv_namespaces: [{ binding: "CACHE" }] }));
 }
@@ -140,7 +153,7 @@ if (tool === "vite" && process.env.WORKERS_CI === "1") {
 		) as { scripts?: Record<string, string> };
 		expect(packageJson.scripts?.build).toBe("bun run scripts/build.ts");
 		expect(packageJson.scripts?.predeploy).toBe(
-			"bun run scripts/build.ts --remote",
+			"bun run scripts/build.ts --remote --skip-workers-ci",
 		);
 		expect(packageJson.scripts?.deploy).toBe("wrangler deploy");
 		expect(packageJson.scripts?.["db:migrate:remote"]).toBe(
@@ -218,6 +231,33 @@ if (tool === "vite" && process.env.WORKERS_CI === "1") {
 		]);
 	});
 
+	it("skips the redundant predeploy build in Workers Builds", async () => {
+		expect(await runDeployFixture(fixtureDirectory, { WORKERS_CI: "1" })).toBe(
+			0,
+		);
+		expect(await readCommands(fixtureDirectory)).toEqual([
+			{ tool: "wrangler", args: ["deploy"] },
+		]);
+	});
+
+	it("keeps remote preparation in a local package deployment", async () => {
+		expect(await runDeployFixture(fixtureDirectory)).toBe(0);
+		const commands = await readCommands(fixtureDirectory);
+		expect(
+			commands.some(
+				({ tool, args }) =>
+					tool === "wrangler" &&
+					args.join(" ") === "d1 migrations apply gmpay-edge --remote",
+			),
+		).toBe(true);
+		expect(
+			commands.some(
+				({ tool, args }) => tool === "vite" && args.join(" ") === "build",
+			),
+		).toBe(true);
+		expect(commands.at(-1)).toEqual({ tool: "wrangler", args: ["deploy"] });
+	});
+
 	it("keeps TanStack Start on its streaming SSR handler", async () => {
 		const source = await readFile(
 			new URL("../../src/server-entry.ts", import.meta.url),
@@ -233,8 +273,33 @@ type Command = { tool: string; args: string[] };
 async function runFixture(
 	directory: string,
 	environment: Record<string, string> = {},
+	arguments_: string[] = [],
 ) {
-	const child = spawn("bun", [join(directory, "scripts/build.ts")], {
+	const child = spawn(
+		"bun",
+		[join(directory, "scripts/build.ts"), ...arguments_],
+		{
+			cwd: directory,
+			env: {
+				...process.env,
+				...environment,
+				COMMAND_LOG: join(directory, "commands.ndjson"),
+				PATH: `${join(directory, "bin")}:${process.env.PATH ?? ""}`,
+			},
+			stdio: "ignore",
+		},
+	);
+	return new Promise<number>((resolve, reject) => {
+		child.once("error", reject);
+		child.once("close", (code) => resolve(code ?? 1));
+	});
+}
+
+async function runDeployFixture(
+	directory: string,
+	environment: Record<string, string> = {},
+) {
+	const child = spawn("bun", ["run", "deploy"], {
 		cwd: directory,
 		env: {
 			...process.env,

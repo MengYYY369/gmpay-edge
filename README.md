@@ -137,10 +137,11 @@ before accepting production payments.
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/GMWalletApp/gmpay-edge)
 
 The guided flow requires a public source repository. It provisions the bindings
-declared in `wrangler.jsonc`, applies D1 migrations, and builds the Worker. Use
-`bun run build` as the Build command and `wrangler deploy` as the Deploy command.
-When deployment finishes, open `/install` on the Worker URL to initialize the
-instance.
+declared in `wrangler.jsonc`, applies D1 migrations, and builds the Worker. Keep
+the auto-detected `bun run build` Build command and `bun run deploy` Deploy
+command. Workers Builds reuses the generated artifact instead of rebuilding it
+during deployment. When deployment finishes, open `/install` on the Worker URL
+to initialize the instance.
 
 ### Wrangler CLI
 

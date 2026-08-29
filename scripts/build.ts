@@ -263,7 +263,16 @@ async function buildForWorkers(): Promise<void> {
 	await bindGeneratedStorage(databaseId, cacheId);
 }
 
-if (process.argv.includes("--remote") || process.env.WORKERS_CI === "1") {
+const skipWorkersCiPredeploy =
+	process.argv.includes("--skip-workers-ci") && process.env.WORKERS_CI === "1";
+
+if (skipWorkersCiPredeploy) {
+	// Workers Builds already ran the build script before its auto-detected
+	// `bun run deploy` command invokes this predeploy lifecycle hook.
+} else if (
+	process.argv.includes("--remote") ||
+	process.env.WORKERS_CI === "1"
+) {
 	await buildForWorkers();
 } else {
 	await run("vite", ["build"]);

@@ -53,7 +53,7 @@
     "start:bun": "bun .output/server/index.mjs",
     "bundle:report": "bun run scripts/bundle-report.ts",
     "preview": "vite preview",
-    "predeploy": "bun run scripts/build.ts --remote",
+    "predeploy": "bun run scripts/build.ts --remote --skip-workers-ci",
     "deploy": "wrangler deploy",
     "cf-typegen": "wrangler types",
     "commitlint": "commitlint",

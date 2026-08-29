@@ -15,10 +15,11 @@ EPay boundary adapter.
 
 The guided flow forks the repository and configures Workers Builds. The source
 repository must be public when the button is used. Configure `bun run build` as
-the Build command and `wrangler deploy` as the Deploy command. The build command
+the Build command and the auto-detected `bun run deploy` as the Deploy command. The build command
 reuses exact named D1, KV, R2, and Queue resources, creates only missing ones,
 applies the D1 baseline, and compiles a Vite artifact containing the resolved
-D1/KV IDs. The portable source `wrangler.jsonc` is never rewritten.
+D1/KV IDs. The deploy lifecycle skips rebuilding inside Workers Builds and uploads
+that generated artifact. The portable source `wrangler.jsonc` is never rewritten.
 When deployment finishes, open `/install` on the Worker URL.
 
 ### Wrangler CLI

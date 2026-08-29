@@ -12,7 +12,7 @@
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/GMWalletApp/gmpay-edge)
 
-引导流程会复刻仓库并配置 Workers Builds，使用按钮时源仓库必须公开。Build command 配置为 `bun run build`，Deploy command 配置为 `wrangler deploy`。构建命令会精确复用同名 D1、KV、R2 和 Queue，只创建缺失资源；应用 D1 基线后，生成包含已解析 D1/KV ID 的 Vite 产物，整个过程不改写可移植的源码 `wrangler.jsonc`。部署完成后访问 Worker 地址的 `/install`。
+引导流程会复刻仓库并配置 Workers Builds，使用按钮时源仓库必须公开。Build command 配置为 `bun run build`，Deploy command 使用自动检测的 `bun run deploy`。构建命令会精确复用同名 D1、KV、R2 和 Queue，只创建缺失资源；应用 D1 基线后，生成包含已解析 D1/KV ID 的 Vite 产物。部署生命周期在 Workers Builds 中不会重复构建，只上传该产物；整个过程不改写可移植的源码 `wrangler.jsonc`。部署完成后访问 Worker 地址的 `/install`。
 
 ### Wrangler CLI
 
