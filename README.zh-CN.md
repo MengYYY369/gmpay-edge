@@ -106,7 +106,7 @@ GMPay Edge 以单个 Cloudflare Worker 部署，并使用 D1、KV、私有 R2、
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/GMWalletApp/gmpay-edge)
 
-引导流程要求源仓库公开。它会配置 `wrangler.jsonc` 中声明的绑定、执行 D1 migration 并构建 Worker。Build command 使用 `bun run build`，Deploy command 使用 `wrangler deploy`。部署完成后访问 Worker 地址的 `/install` 初始化实例。
+引导流程要求源仓库公开。它会配置 `wrangler.jsonc` 中声明的绑定、执行 D1 migration 并构建 Worker。请保留自动检测的 Build command `bun run build` 和 Deploy command `bun run deploy`；Workers Builds 会在部署阶段复用已经生成的产物，不会重复构建。部署完成后访问 Worker 地址的 `/install` 初始化实例。
 
 ### Wrangler CLI
 
