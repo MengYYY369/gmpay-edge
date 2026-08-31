@@ -250,7 +250,7 @@
 	"admin_users_error_cannot_disable_self": "不能停用自己的帳號",
 	"admin_users_error_cannot_delete_self": "不能刪除自己的帳號",
 	"admin_users_error_last_root_required": "系統至少需要一個已啟用的 root 使用者",
-	"admin_users_error_root_role_required": "只有 root 使用者可以變更 root 成員",
+	"admin_users_error_root_role_required": "只有 root 使用者可以管理 root 使用者及其角色歸屬",
 	"admin_users_error_role_unavailable": "一個或多個所選角色無法使用",
 	"admin_users_error_own_roles_required": "不能移除自己帳號的全部角色",
 	"admin_users_toggleLabel": "切换 {email}",

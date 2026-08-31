@@ -4,7 +4,10 @@ import {
 	assertTransition,
 	InvalidOrderTransitionError,
 } from "#/features/orders/state-machine";
-import { emitOrderStatusEvent } from "#/features/payments/server/order-status-event";
+import {
+	emitOrderStatusEvent,
+	prepareOrderStatusEvent,
+} from "#/features/payments/server/order-status-event";
 import type { PaymentRuntime } from "#/features/payments/server/payment-events";
 import type { PaymentScanMessage } from "#/features/payments/types";
 import { DomainError } from "#/lib/domain-error";
@@ -95,18 +98,25 @@ export async function cancelOrderAsAdmin(
 	}
 	const status = statusOf(order.status);
 	assertAdminTransition(status, "cancelled", "merchant_cancelled");
-	const changed = await cancelOrderAtomically(env.DB, orderId, {
-		status,
-		version: order.version,
-	});
-	if (!changed) throw orderStatusConflict();
-	await writeAudit(env.DB, context, {
-		action: "order.cancelled_by_admin",
+	const event = await prepareOrderStatusEvent(
+		env,
 		orderId,
-		before: { status },
-		after: { status: "cancelled" },
-	});
-	await emitOrderStatusEvent(env, orderId, "cancelled", `${orderId}:cancelled`);
+		"cancelled",
+		`${orderId}:cancelled`,
+	);
+	const changed = await cancelOrderAtomically(
+		env.DB,
+		orderId,
+		{
+			status,
+			version: order.version,
+		},
+		Date.now(),
+		{ ...context, action: "order.cancelled_by_admin" },
+		event.statements,
+	);
+	if (!changed) throw orderStatusConflict();
+	await event.dispatch();
 	return { status: "cancelled" as const, changed: true };
 }
 
@@ -129,42 +139,51 @@ export async function recordExternalRefund(
 	assertAdminTransition(status, "refunded", "admin_refund");
 	const now = Date.now();
 	const auditId = crypto.randomUUID();
-	const results = await env.DB.batch([
-		env.DB.prepare(
-			`UPDATE orders SET status = 'refunded', version = version + 1, updated_at = ?
-			 WHERE id = ? AND version = ? AND status = ?`,
-		).bind(now, input.orderId, order.version, status),
-		env.DB.prepare(
-			`INSERT INTO audit_logs
-			 (id, actor_user_id, action, target_type, target_id, request_id, ip_address, before, after, created_at)
-			 SELECT ?, ?, 'order.external_refund_recorded', 'order', ?, ?, ?, ?, ?, ?
-			 WHERE EXISTS (SELECT 1 FROM orders WHERE id = ? AND status = 'refunded' AND version = ?)`,
-		).bind(
-			auditId,
-			context.actorUserId,
-			input.orderId,
-			context.requestId,
-			context.ipAddress,
-			JSON.stringify({ status }),
-			JSON.stringify({
-				status: "refunded",
-				reference: input.reference,
-				note: input.note,
-			}),
-			now,
-			input.orderId,
-			order.version + 1,
-		),
-	]);
-	if ((results[0]?.meta.changes ?? 0) !== 1) {
-		throw orderStatusConflict();
-	}
-	await emitOrderStatusEvent(
+	const event = await prepareOrderStatusEvent(
 		env,
 		input.orderId,
 		"refunded",
 		`${input.orderId}:refunded`,
 	);
+	try {
+		await env.DB.batch([
+			env.DB.prepare(
+				`UPDATE orders SET status = 'refunded', version = version + 1, updated_at = ?
+			 WHERE id = ? AND version = ? AND status = ?`,
+			).bind(now, input.orderId, order.version, status),
+			env.DB.prepare(
+				"SELECT CASE WHEN changes() = 1 THEN 1 ELSE json_extract('order refund conflict', '$') END",
+			),
+			env.DB.prepare(
+				`INSERT INTO audit_logs
+			 (id, actor_user_id, action, target_type, target_id, request_id, ip_address, before, after, created_at)
+			 SELECT ?, ?, 'order.external_refund_recorded', 'order', ?, ?, ?, ?, ?, ?
+			 WHERE EXISTS (SELECT 1 FROM orders WHERE id = ? AND status = 'refunded' AND version = ?)`,
+			).bind(
+				auditId,
+				context.actorUserId,
+				input.orderId,
+				context.requestId,
+				context.ipAddress,
+				JSON.stringify({ status }),
+				JSON.stringify({
+					status: "refunded",
+					reference: input.reference,
+					note: input.note,
+				}),
+				now,
+				input.orderId,
+				order.version + 1,
+			),
+			...event.statements,
+		]);
+	} catch (error) {
+		const current = await loadMutableOrder(env.DB, input.orderId);
+		if (current.status !== order.status || current.version !== order.version)
+			throw orderStatusConflict();
+		throw error;
+	}
+	await event.dispatch();
 	return { status: "refunded" as const, changed: true };
 }
 
@@ -236,34 +255,4 @@ function orderStatusConflict() {
 		409,
 		"Order status changed or does not allow this operation",
 	);
-}
-
-async function writeAudit(
-	db: D1Database,
-	context: AdminOrderActionContext,
-	entry: {
-		action: string;
-		orderId: string;
-		before: Record<string, unknown>;
-		after: Record<string, unknown>;
-	},
-) {
-	await db
-		.prepare(
-			`INSERT INTO audit_logs
-			 (id, actor_user_id, action, target_type, target_id, request_id, ip_address, before, after, created_at)
-			 VALUES (?, ?, ?, 'order', ?, ?, ?, ?, ?, ?)`,
-		)
-		.bind(
-			crypto.randomUUID(),
-			context.actorUserId,
-			entry.action,
-			entry.orderId,
-			context.requestId,
-			context.ipAddress,
-			JSON.stringify(entry.before),
-			JSON.stringify(entry.after),
-			Date.now(),
-		)
-		.run();
 }

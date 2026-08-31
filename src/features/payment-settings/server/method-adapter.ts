@@ -38,6 +38,7 @@ export async function createReceivingMethodAdapters(
 	db: D1Database,
 	receivingMethodId: string,
 	sharedRuntime?: RuntimeConfig,
+	selection?: { assetId: string; targetValue: string },
 ) {
 	const method = await db
 		.prepare(
@@ -62,6 +63,13 @@ export async function createReceivingMethodAdapters(
 			throw new Error("Receiving provider configuration is invalid");
 		providerConfig = parsed as Record<string, unknown>;
 	}
+	if (selection)
+		return createPaymentMethodAdapters(
+			db,
+			selection.assetId,
+			selection.targetValue,
+			providerConfig,
+		);
 	const links = await db
 		.prepare(
 			"SELECT payment_asset_id FROM receiving_method_assets WHERE receiving_method_id = ? ORDER BY payment_asset_id",

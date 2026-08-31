@@ -37,6 +37,8 @@ Production scanners do not assume that one provider response contains every paym
 
 The scheduled dispatcher orders active payments by `last_payment_scan_at`; it advances that value only after Cloudflare Queues accepts the complete batch. This rotates fairly through more active orders than the configured batch size and retries the same orders if enqueueing fails. Each order also stores a monotonic provider cursor after a complete successful scan. Empty or failed scans do not advance it, and previously detected unconfirmed transactions are refreshed by hash so confirmation and reorganization checks continue after the address cursor moves forward.
 
+Within each oldest-due batch, USDT orders are enqueued first; orders of the same priority retain their existing order. Priority does not change batch membership, so other assets continue to rotate fairly. Queue delivery and completion order are not guaranteed. Each scan uses only the asset and target in that order's immutable snapshot, and adapter caches are isolated by receiving method, asset, and target. An empty USDT scan cannot suppress an ETH payment, or vice versa.
+
 Paid and overpaid orders remain in the scan rotation for the configured `payments.reorg_monitor_ms` window (86,400,000 milliseconds, or 24 hours, by default). Confirmed transaction events are refreshed during this period. A first provider miss marks the chain event as `missing` without changing the order; recovery is silent, while a second consecutive miss records a reorganization and atomically removes the payment from the order aggregate.
 
 ### Bounded I/O and retry budget

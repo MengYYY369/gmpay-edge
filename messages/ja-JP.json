@@ -250,7 +250,7 @@
   "admin_users_error_cannot_disable_self": "自分のアカウントを無効にすることはできません",
   "admin_users_error_cannot_delete_self": "自分のアカウントを削除することはできません",
 	"admin_users_error_last_root_required": "有効な root ユーザーが少なくとも1人必要です",
-	"admin_users_error_root_role_required": "root ユーザーだけが root メンバーを変更できます",
+	"admin_users_error_root_role_required": "root ユーザーとそのロール割り当てを管理できるのは root ユーザーだけです",
   "admin_users_error_role_unavailable": "選択したロールの一部が利用できません",
   "admin_users_error_own_roles_required": "自分のアカウントからすべてのロールを削除することはできません",
   "admin_users_toggleLabel": "{email}の切り替え",

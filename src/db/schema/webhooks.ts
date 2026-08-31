@@ -118,6 +118,7 @@ export const inboundProviderEvents = sqliteTable(
 		attemptCount: integer("attempt_count").notNull().default(0),
 		nextAttemptAt: integer("next_attempt_at", { mode: "timestamp_ms" }),
 		leaseUntil: integer("lease_until", { mode: "timestamp_ms" }),
+		leaseToken: text("lease_token"),
 		lastErrorCode: text("last_error_code"),
 		receivedAt: integer("received_at", { mode: "timestamp_ms" }).notNull(),
 		queuedAt: integer("queued_at", { mode: "timestamp_ms" }),

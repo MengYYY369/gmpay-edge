@@ -1,4 +1,6 @@
+import { z } from "zod";
 import { toGmpayStatus } from "#/features/orders/gmpay-status";
+import { orderStatuses } from "#/features/orders/schema";
 import type { WebhookDeliveryResult } from "#/features/webhooks/server/delivery";
 import {
 	deliverWebhook,
@@ -8,9 +10,7 @@ import {
 	type WebhookQueueMessage,
 	webhookJsonObjectSchema,
 } from "#/features/webhooks/types";
-import { unitsToDecimal } from "#/lib/money";
 import { decryptSecret } from "#/lib/secrets";
-import { minorToDecimal } from "#/lib/units";
 import {
 	assertSafeResolvedWebhookUrl,
 	isSafeWebhookUrl,
@@ -28,6 +28,18 @@ export interface WebhookQueueMessageLike {
 	ack(): void;
 	retry(options?: { delaySeconds?: number }): void;
 }
+
+const callbackSnapshotSchema = z.object({
+	status: z.enum(orderStatuses),
+	amount: z.string().regex(/^\d+(?:\.\d+)?$/),
+	payment: z.object({
+		amount: z
+			.string()
+			.regex(/^\d+(?:\.\d+)?$/)
+			.nullable(),
+		asset: z.string().nullable(),
+	}),
+});
 
 export async function processWebhookMessage(
 	db: D1Database,
@@ -209,12 +221,10 @@ async function resolveWebhookDelivery(
 	const row = await db
 		.prepare(
 			`SELECT e.payload, o.notify_url AS url, o.api_protocol,
-			 o.id AS order_id, o.external_order_id, o.amount_minor,
-			 o.currency_decimals, ops.expected_amount_units, ops.decimals,
+			 o.id AS order_id, o.external_order_id,
 			 o.description, o.metadata,
-			 o.status, k.pid, k.secret_encrypted,
-			 COALESCE(ops.target_value, '') AS receive_address,
-			 COALESCE(ops.asset_code, '') AS token
+			 k.pid, k.secret_encrypted,
+			 COALESCE(ops.target_value, '') AS receive_address
 			 FROM webhook_deliveries d
 			 JOIN webhook_events e ON e.id = d.event_id
 			 JOIN orders o ON o.id = d.order_id
@@ -229,17 +239,11 @@ async function resolveWebhookDelivery(
 			api_protocol: "gmpay" | "epay" | null;
 			order_id: string;
 			external_order_id: string;
-			amount_minor: string;
-			currency_decimals: number;
-			expected_amount_units: string | null;
-			decimals: number | null;
 			description: string | null;
 			metadata: string | null;
-			status: import("#/features/orders/schema").OrderStatus;
 			pid: string;
 			secret_encrypted: string;
 			receive_address: string;
-			token: string;
 		}>();
 	if (!row) throw new Error("Webhook delivery configuration not found");
 	if (!row.api_protocol)
@@ -252,13 +256,9 @@ async function resolveWebhookDelivery(
 	if (!runtime.apiKeyPepper)
 		throw new Error("Webhook signing secret is unavailable");
 	const payload = webhookJsonObjectSchema.parse(JSON.parse(row.payload));
+	const snapshot = callbackSnapshotSchema.parse(payload);
 	const transaction = webhookJsonObjectSchema.safeParse(payload.transaction);
 	const metadata = parseMetadata(row.metadata);
-	const amount = minorToDecimal(row.amount_minor, row.currency_decimals);
-	const paymentAmount =
-		row.expected_amount_units !== null && row.decimals !== null
-			? unitsToDecimal(BigInt(row.expected_amount_units), row.decimals)
-			: "0";
 	const base = {
 		...message,
 		url: row.url,
@@ -273,14 +273,14 @@ async function resolveWebhookDelivery(
 				pid: row.pid,
 				trade_id: row.order_id,
 				order_id: row.external_order_id,
-				amount,
-				actual_amount: paymentAmount,
+				amount: snapshot.amount,
+				actual_amount: snapshot.payment.amount ?? "0",
 				receive_address: row.receive_address,
-				token: row.token,
+				token: snapshot.payment.asset ?? "",
 				block_transaction_id: String(
 					transaction.success ? (transaction.data.hash ?? "") : "",
 				),
-				status: toGmpayStatus(row.status),
+				status: toGmpayStatus(snapshot.status),
 			},
 		};
 	return {
@@ -292,8 +292,8 @@ async function resolveWebhookDelivery(
 			out_trade_no: row.external_order_id,
 			type: metadata.epayType ?? "alipay",
 			name: row.description ?? row.external_order_id,
-			money: amount,
-			trade_status: epayTradeStatus(row.status),
+			money: snapshot.amount,
+			trade_status: epayTradeStatus(snapshot.status),
 			...(metadata.epayParam ? { param: metadata.epayParam } : {}),
 		},
 	};

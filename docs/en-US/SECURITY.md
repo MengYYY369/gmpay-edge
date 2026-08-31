@@ -4,6 +4,24 @@
 
 ## Account enrollment
 
+- Editing a root user's profile or credentials requires a currently enabled root
+  actor, checked inside the same batch as the user, credential, and session writes.
+  A concurrent root-role assignment cannot bypass this check. `settings:read`
+  remains a sensitive permission that can read runtime secrets, not a monitoring role.
+- Payment review approval, payment accounting, approval audit, and notification
+  outbox commit together. A concurrent rejection rolls back the approval's payment
+  writes; failed verification or persistence leaves the review pending for retry.
+- Administrator cancellation/refund commits the order, audit, and durable outbox
+  atomically. Queue dispatch is post-commit and recoverable from the outbox.
+- Payment scans use the order snapshot's asset and target, with a cache keyed by
+  receiving method, asset, and target; connection failover never changes the asset.
+- Provider-event migration `0007_sparkling_wallflower.sql` adds a nullable lease
+  token without rewriting existing rows. A claim lasts five minutes (eight bounded
+  30-second EVM lookups plus headroom). Token and expiry checks fence accounting,
+  completion, failure, and source-health updates; recovery invalidates old owners.
+  Apply the normal D1 migrations before deploying the Worker; Bun applies migrations
+  on startup. Old processing rows remain recoverable after their existing lease expires.
+
 Public email registration is disabled. A newly deployed instance intentionally
 exposes `/install` so its operator can atomically create the first
 protected `root` user, and all later accounts must be created from the

@@ -250,7 +250,7 @@
 	"admin_users_error_cannot_disable_self": "You cannot disable your own account",
 	"admin_users_error_cannot_delete_self": "You cannot delete your own account",
 	"admin_users_error_last_root_required": "At least one enabled root user is required",
-	"admin_users_error_root_role_required": "Only a root user can change root membership",
+	"admin_users_error_root_role_required": "Only a root user can manage root users or their membership",
 	"admin_users_error_role_unavailable": "One or more selected roles are unavailable",
 	"admin_users_error_own_roles_required": "You cannot remove all roles from your own account",
 	"admin_users_toggleLabel": "Toggle {email}",

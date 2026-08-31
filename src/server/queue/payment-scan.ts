@@ -25,7 +25,7 @@ export async function handlePaymentScan(
 	adapterCache?: Map<string, ReceivingAdaptersPromise>,
 ): Promise<void> {
 	const payment = await env.DB.prepare(
-		`SELECT ops.asset_code, ops.target_value, o.provider_order_id,
+		`SELECT ops.asset_id, ops.asset_code, ops.target_value, o.provider_order_id,
 		 o.payment_scan_cursor
 		 FROM order_payment_snapshots ops
 		 JOIN orders o ON o.id = ops.order_id
@@ -33,6 +33,7 @@ export async function handlePaymentScan(
 	)
 		.bind(message.body.orderId, message.body.receivingMethodId)
 		.first<{
+			asset_id: string;
 			asset_code: string;
 			target_value: string;
 			provider_order_id: string | null;
@@ -59,10 +60,15 @@ export async function handlePaymentScan(
 				env.DB,
 				message.body.receivingMethodId,
 				runtime,
+				{ assetId: payment.asset_id, targetValue: payment.target_value },
 			);
 		if (!adapterCache) candidates = await load();
 		else {
-			const key = message.body.receivingMethodId;
+			const key = JSON.stringify([
+				message.body.receivingMethodId,
+				payment.asset_id,
+				payment.target_value,
+			]);
 			let pending = adapterCache.get(key);
 			if (!pending) {
 				pending = load();

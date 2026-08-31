@@ -1,6 +1,5 @@
 import { z } from "zod";
 import { submitCheckoutTransaction } from "#/features/checkout/server/submit-transaction";
-import { resolveLatePayment } from "#/features/payments/server/late-payment";
 import type { PaymentRuntime } from "#/features/payments/server/payment-events";
 import { DomainError } from "#/lib/domain-error";
 
@@ -44,7 +43,6 @@ export async function resolvePaymentReview(
 			"Payment review is already resolved",
 		);
 
-	let orderStatus: string | null = null;
 	const transactionHash = data.transactionHash ?? review.transaction_hash;
 	if (data.decision === "approve") {
 		if (!transactionHash)
@@ -53,36 +51,36 @@ export async function resolvePaymentReview(
 				422,
 				"A transaction hash is required",
 			);
-		const verified = await submitCheckoutTransaction(
-			env,
-			{ orderId: review.order_id, transactionHash },
-			context.adapterFactory,
-			true,
-		);
-		if (verified.status !== "accepted")
-			throw verificationError(verified.status);
-		orderStatus = verified.orderStatus;
-		if (["expired", "cancelled"].includes(verified.orderStatus)) {
-			const payment = await env.DB.prepare(
-				"SELECT id FROM order_payments WHERE order_id = ? AND transaction_id = ? LIMIT 1",
-			)
-				.bind(review.order_id, verified.transactionId)
-				.first<{ id: string }>();
-			if (!payment) throw new Error("Verified late payment was not persisted");
-			const resolution = await resolveLatePayment(env, payment.id, "accept");
-			orderStatus = resolution.status;
+		try {
+			const verified = await submitCheckoutTransaction(
+				env,
+				{ orderId: review.order_id, transactionHash },
+				context.adapterFactory,
+				true,
+				{
+					reviewId: data.reviewId,
+					transactionHash,
+					reviewerUserId: context.reviewerUserId,
+					note: data.note,
+					requestId: context.requestId ?? null,
+					ipAddress: context.ipAddress ?? null,
+				},
+			);
+			if (verified.status !== "accepted")
+				throw verificationError(verified.status);
+			return { status: "approved", orderStatus: verified.orderStatus };
+		} catch (error) {
+			return rethrowResolutionError(env.DB, data.reviewId, error);
 		}
 	}
 
 	const now = Date.now();
-	const nextStatus = data.decision === "approve" ? "approved" : "rejected";
-	const [update] = await env.DB.batch([
+	await env.DB.batch([
 		env.DB.prepare(
-			`UPDATE payment_reviews SET status = ?, transaction_hash = ?, reviewer_user_id = ?,
+			`UPDATE payment_reviews SET status = 'rejected', transaction_hash = ?, reviewer_user_id = ?,
 				 resolution_note = ?, reviewed_at = ?, updated_at = ?
 				 WHERE id = ? AND status = 'pending'`,
 		).bind(
-			nextStatus,
 			transactionHash ?? null,
 			context.reviewerUserId,
 			data.note,
@@ -91,33 +89,43 @@ export async function resolvePaymentReview(
 			data.reviewId,
 		),
 		env.DB.prepare(
+			"SELECT CASE WHEN changes() = 1 THEN 1 ELSE json_extract('payment review conflict', '$') END",
+		),
+		env.DB.prepare(
 			`INSERT INTO audit_logs
 				 (id, actor_user_id, action, target_type, target_id, request_id, ip_address, after, created_at)
-				 SELECT ?, ?, ?, 'payment_review', ?, ?, ?, ?, ?
-				 WHERE EXISTS (
-				  SELECT 1 FROM payment_reviews WHERE id = ? AND status = ? AND reviewed_at = ?
-				 )`,
+				 VALUES (?, ?, 'payment_review.rejected', 'payment_review', ?, ?, ?, ?, ?)`,
 		).bind(
 			crypto.randomUUID(),
 			context.reviewerUserId,
-			`payment_review.${nextStatus}`,
 			data.reviewId,
 			context.requestId ?? null,
 			context.ipAddress ?? null,
-			JSON.stringify({ orderId: review.order_id, orderStatus }),
-			now,
-			data.reviewId,
-			nextStatus,
+			JSON.stringify({ orderId: review.order_id, orderStatus: null }),
 			now,
 		),
-	]);
-	if ((update?.meta.changes ?? 0) !== 1)
+	]).catch((error: unknown) =>
+		rethrowResolutionError(env.DB, data.reviewId, error),
+	);
+	return { status: "rejected", orderStatus: null };
+}
+
+async function rethrowResolutionError(
+	db: D1Database,
+	reviewId: string,
+	error: unknown,
+): Promise<never> {
+	const current = await db
+		.prepare("SELECT status FROM payment_reviews WHERE id = ?")
+		.bind(reviewId)
+		.first<{ status: string }>();
+	if (current?.status !== "pending")
 		throw new DomainError(
 			"payment_review_resolution_conflict",
 			409,
 			"Payment review was resolved concurrently",
 		);
-	return { status: nextStatus, orderStatus };
+	throw error;
 }
 
 function verificationError(

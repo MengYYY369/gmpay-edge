@@ -514,6 +514,144 @@ describe("provider payment event consumer", () => {
 			status: 409,
 		});
 	});
+
+	it("keeps the lease valid across eight sequential 30-second lookups", async () => {
+		await resetOrder(db);
+		await insertEvent(
+			db,
+			"event-long-lookup",
+			"tx-long-lookup",
+			false,
+			"shadow",
+		);
+		let now = Date.now();
+		const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+		let calls = 0;
+		mocks.createPaymentMethodAdapters.mockResolvedValue(
+			Array.from({ length: 8 }, () => ({
+				adapter: adapter((hash) => {
+					calls += 1;
+					now += 30_000;
+					return calls === 8 ? transaction(hash) : null;
+				}),
+			})),
+		);
+		try {
+			await handlePaymentProviderEvent(queueMessage("event-long-lookup"), {
+				DB: db,
+			} as Env);
+			expect(calls).toBe(8);
+			expect(await providerState(db, "event-long-lookup")).toMatchObject({
+				event_status: "ignored",
+				last_error_code: "shadow_matched",
+				payments: 0,
+			});
+		} finally {
+			clock.mockRestore();
+		}
+	});
+
+	it("fences an expired lease before accounting even without a new owner", async () => {
+		await resetOrder(db);
+		await db
+			.prepare("UPDATE payment_ingresses SET mode = 'active' WHERE id = ?")
+			.bind(sourceId)
+			.run();
+		const id = "event-expired-owner";
+		await insertEvent(db, id, "tx-expired-owner");
+		mocks.createPaymentMethodAdapters.mockResolvedValue([
+			{
+				adapter: {
+					...adapter(transaction),
+					getTransaction: async (hash: string) => {
+						await db
+							.prepare(
+								"UPDATE inbound_provider_events SET lease_until = ? WHERE id = ?",
+							)
+							.bind(Date.now() - 1, id)
+							.run();
+						return transaction(hash);
+					},
+				},
+			},
+		]);
+		const message = queueMessage(id);
+		await handlePaymentProviderEvent(message, { DB: db } as Env);
+		expect(message.ack).toHaveBeenCalledOnce();
+		expect(await providerState(db, id)).toMatchObject({
+			event_status: "processing",
+			order_status: "pending",
+			payments: 0,
+		});
+		await recoverProviderEventOutbox({ DB: db });
+		expect(await providerState(db, id)).toMatchObject({
+			event_status: "failed",
+			payments: 0,
+		});
+	});
+
+	it.each([
+		"payment",
+		"mismatch",
+		"error",
+	] as const)("fences a stale consumer's %s result after a new owner claims the event", async (result) => {
+		await resetOrder(db);
+		await db
+			.prepare(
+				"UPDATE payment_ingresses SET mode = 'active', health_status = 'healthy', last_error_code = NULL WHERE id = ?",
+			)
+			.bind(sourceId)
+			.run();
+		const id = `event-stale-${result}`;
+		await insertEvent(db, id, `tx-stale-${result}`);
+		mocks.createPaymentMethodAdapters.mockResolvedValue([
+			{
+				adapter: {
+					...adapter(transaction),
+					getTransaction: async (hash: string) => {
+						await db
+							.prepare(
+								"UPDATE inbound_provider_events SET lease_token = 'new-owner', attempt_count = attempt_count + 1, lease_until = ? WHERE id = ?",
+							)
+							.bind(Date.now() + 300_000, id)
+							.run();
+						if (result === "error") throw new Error("Old provider failure");
+						const tx = transaction(hash);
+						return result === "mismatch"
+							? { ...tx, to: "0x1111111111111111111111111111111111111111" }
+							: tx;
+					},
+				},
+			},
+		]);
+		const message = queueMessage(id);
+		await handlePaymentProviderEvent(message, { DB: db } as Env);
+		expect(message.ack).toHaveBeenCalledOnce();
+		expect(
+			await db
+				.prepare(
+					"SELECT status, lease_token, attempt_count FROM inbound_provider_events WHERE id = ?",
+				)
+				.bind(id)
+				.first(),
+		).toEqual({
+			status: "processing",
+			lease_token: "new-owner",
+			attempt_count: 2,
+		});
+		expect(await providerState(db, id)).toMatchObject({
+			order_status: "pending",
+			payments: 0,
+		});
+		expect(
+			await db
+				.prepare(
+					"SELECT health_status, last_error_code FROM payment_ingresses WHERE id = ?",
+				)
+				.bind(sourceId)
+				.first(),
+		).toEqual({ health_status: "healthy", last_error_code: null });
+	});
 });
 
 function adapter(

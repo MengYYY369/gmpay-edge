@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { orderIdPathSchema } from "#/features/orders/schema";
+import type { PaymentReviewApproval } from "#/features/payment-reviews/server/approval";
 import { createReceivingMethodAdapters } from "#/features/payment-settings/server/method-adapter";
 import {
 	PaymentAttributionAmbiguousError,
@@ -33,8 +34,7 @@ export type CheckoutTransactionResult =
 	| { status: "unavailable" };
 
 type AdapterFactory = (
-	db: D1Database,
-	receivingMethodId: string,
+	...input: Parameters<typeof createReceivingMethodAdapters>
 ) => Promise<Array<{ adapter: PaymentAdapter<unknown> }>>;
 
 /**
@@ -46,12 +46,13 @@ export async function submitCheckoutTransaction(
 	input: CheckoutTransactionSubmission,
 	createAdapters: AdapterFactory = createReceivingMethodAdapters,
 	allowLate = false,
+	reviewApproval?: PaymentReviewApproval,
 ): Promise<CheckoutTransactionResult> {
 	const orderId = orderIdPathSchema.parse(input.orderId);
 	const transactionHash = transactionHashSchema.parse(input.transactionHash);
 	const order = await env.DB.prepare(
 		`SELECT o.status, o.expires_at, ops.target_value AS address,
-		 ops.asset_code, ops.receiving_method_id
+		 ops.asset_id, ops.asset_code, ops.receiving_method_id
 		 FROM orders o
 		 JOIN order_payment_snapshots ops ON ops.order_id = o.id
 		 WHERE o.id = ? LIMIT 1`,
@@ -62,6 +63,7 @@ export async function submitCheckoutTransaction(
 			expires_at: number;
 			address: string;
 			asset_code: string;
+			asset_id: string;
 			receiving_method_id: string;
 		}>();
 	if (!order) return { status: "unavailable" };
@@ -73,7 +75,10 @@ export async function submitCheckoutTransaction(
 	}
 
 	const adapters = (
-		await createAdapters(env.DB, order.receiving_method_id)
+		await createAdapters(env.DB, order.receiving_method_id, undefined, {
+			assetId: order.asset_id,
+			targetValue: order.address,
+		})
 	).map((candidate) => candidate.adapter);
 	if (!adapters.length) return { status: "unavailable" };
 	let matchedTransaction: NormalizedTransaction | undefined;
@@ -120,6 +125,8 @@ export async function submitCheckoutTransaction(
 		env,
 		orderId,
 		matchedTransaction,
+		undefined,
+		reviewApproval ? { reviewApproval } : undefined,
 	);
 	return {
 		status: "accepted",

@@ -309,30 +309,40 @@ describe("payment review flow", () => {
 	});
 
 	it("returns a stable conflict when conditional resolution loses", async () => {
-		const conflictDb = {
-			batch: async () => [{ meta: { changes: 0 } }, { meta: { changes: 0 } }],
-			prepare(query: string) {
-				return {
-					bind() {
-						return {
-							first: async () =>
-								query.startsWith("SELECT order_id")
-									? {
-											order_id: orderId,
-											status: "pending",
-											transaction_hash: null,
-										}
-									: null,
-						};
-					},
-				};
+		const id = "26071306394512345690";
+		await cloneReviewOrder(db, id);
+		const review = await createPaymentReview(
+			{
+				orderId: id,
+				description: "Concurrent rejection regression",
+				evidence: pngEvidence(),
 			},
-		} as unknown as D1Database;
+			{ db, bucket },
+		);
+		const conflictDb = new Proxy(db, {
+			get(target, property) {
+				if (property === "batch")
+					return async (statements: D1PreparedStatement[]) => {
+						await resolvePaymentReview(
+							env,
+							{
+								reviewId: review.id,
+								decision: "reject",
+								note: "Winning rejection",
+							},
+							{ reviewerUserId: "reviewer" },
+						);
+						return target.batch(statements);
+					};
+				const value = Reflect.get(target, property);
+				return typeof value === "function" ? value.bind(target) : value;
+			},
+		});
 		await expect(
 			resolvePaymentReview(
 				{ DB: conflictDb } as Env,
 				{
-					reviewId: "00000000-0000-4000-8000-000000000098",
+					reviewId: review.id,
 					decision: "reject",
 					note: "Another request completed first.",
 				},
@@ -342,8 +352,181 @@ describe("payment review flow", () => {
 			code: "payment_review_resolution_conflict",
 			status: 409,
 		});
+		expect(
+			await db
+				.prepare(
+					"SELECT COUNT(*) AS count FROM audit_logs WHERE target_id = ? AND action = 'payment_review.rejected'",
+				)
+				.bind(review.id)
+				.first(),
+		).toEqual({ count: 1 });
+	});
+
+	it("rolls back approval accounting when rejection wins during verification", async () => {
+		const id = "26071306394512345680";
+		await cloneReviewOrder(db, id);
+		const review = await createPaymentReview(
+			{
+				orderId: id,
+				description: "Concurrent decision regression",
+				transactionHash: "race-transaction",
+				evidence: pngEvidence(),
+			},
+			{ db, bucket },
+		);
+		const adapter = fakeAdapter();
+		let onVerified = () => {};
+		let onResume = () => {};
+		const verified = new Promise<void>((resolve) => {
+			onVerified = resolve;
+		});
+		const resume = new Promise<void>((resolve) => {
+			onResume = resolve;
+		});
+		const approve = resolvePaymentReview(
+			env,
+			{
+				reviewId: review.id,
+				decision: "approve",
+				note: "Approve verified payment",
+			},
+			{
+				reviewerUserId: "reviewer",
+				adapterFactory: async () => [
+					{
+						adapter: {
+							...adapter,
+							getTransaction: async () => {
+								onVerified();
+								await resume;
+								const tx = await adapter.getTransaction("race-transaction");
+								return tx ? { ...tx, hash: "race-transaction" } : null;
+							},
+						},
+					},
+				],
+			},
+		);
+		const outcome = approve.then(
+			() => null,
+			(error: unknown) => error,
+		);
+		await verified;
+		await resolvePaymentReview(
+			env,
+			{
+				reviewId: review.id,
+				decision: "reject",
+				note: "Reject while RPC is pending",
+			},
+			{ reviewerUserId: "reviewer" },
+		);
+		onResume();
+		expect(await outcome).toMatchObject({
+			code: "payment_review_resolution_conflict",
+		});
+		expect(
+			await db
+				.prepare(`SELECT o.status, o.received_amount_units, r.status AS review_status,
+		 (SELECT COUNT(*) FROM order_payments WHERE order_id = o.id) AS payments,
+		 (SELECT COUNT(*) FROM webhook_events WHERE order_id = o.id) AS events
+		 FROM orders o JOIN payment_reviews r ON r.order_id = o.id WHERE o.id = ?`)
+				.bind(id)
+				.first(),
+		).toEqual({
+			status: "pending",
+			received_amount_units: "0",
+			review_status: "rejected",
+			payments: 0,
+			events: 0,
+		});
+	});
+
+	it("keeps an approval pending after a failed commit and accepts an expired order atomically on retry", async () => {
+		const id = "26071306394512345681";
+		await cloneReviewOrder(db, id);
+		await db
+			.prepare("UPDATE orders SET status = 'expired' WHERE id = ?")
+			.bind(id)
+			.run();
+		const review = await createPaymentReview(
+			{
+				orderId: id,
+				description: "Retry an expired payment review",
+				transactionHash: "late-review-transaction",
+				evidence: pngEvidence(),
+			},
+			{ db, bucket },
+		);
+		const adapter = fakeAdapter();
+		const factory = async () => [
+			{
+				adapter: {
+					...adapter,
+					getTransaction: async () => {
+						const tx = await adapter.getTransaction("late-review-transaction");
+						return tx ? { ...tx, hash: "late-review-transaction" } : null;
+					},
+				},
+			},
+		];
+		await db
+			.prepare(`CREATE TRIGGER fail_review_approval BEFORE UPDATE OF status ON payment_reviews
+		 WHEN NEW.status = 'approved' BEGIN SELECT RAISE(FAIL, 'simulated approval failure'); END`)
+			.run();
+		try {
+			await expect(
+				resolvePaymentReview(
+					env,
+					{
+						reviewId: review.id,
+						decision: "approve",
+						note: "Late payment approved",
+					},
+					{ reviewerUserId: "reviewer", adapterFactory: factory },
+				),
+			).rejects.toThrow();
+			expect(
+				await db
+					.prepare("SELECT status FROM payment_reviews WHERE id = ?")
+					.bind(review.id)
+					.first(),
+			).toEqual({ status: "pending" });
+			expect(
+				await db
+					.prepare("SELECT status FROM orders WHERE id = ?")
+					.bind(id)
+					.first(),
+			).toEqual({ status: "expired" });
+		} finally {
+			await db.prepare("DROP TRIGGER fail_review_approval").run();
+		}
+		await expect(
+			resolvePaymentReview(
+				env,
+				{
+					reviewId: review.id,
+					decision: "approve",
+					note: "Late payment approved",
+				},
+				{ reviewerUserId: "reviewer", adapterFactory: factory },
+			),
+		).resolves.toEqual({ status: "approved", orderStatus: "paid" });
 	});
 });
+
+async function cloneReviewOrder(db: D1Database, id: string) {
+	await db.batch([
+		db
+			.prepare(`INSERT INTO orders (id, external_order_id, status, amount_minor, currency, currency_decimals, payment_asset_id, received_amount_units, expires_at, version, created_at, updated_at)
+		 SELECT ?, ?, 'pending', amount_minor, currency, currency_decimals, payment_asset_id, '0', expires_at, 0, created_at, updated_at FROM orders WHERE id = ?`)
+			.bind(id, id, orderId),
+		db
+			.prepare(`INSERT INTO order_payment_snapshots (order_id, receiving_method_id, receiving_method_name, rail_code, rail_kind, asset_id, asset_code, decimals, target_value, connection_id, adapter, required_confirmations, expected_amount_units, created_at)
+		 SELECT ?, receiving_method_id, receiving_method_name, rail_code, rail_kind, asset_id, asset_code, decimals, target_value, connection_id, adapter, required_confirmations, expected_amount_units, created_at FROM order_payment_snapshots WHERE order_id = ?`)
+			.bind(id, orderId),
+	]);
+}
 
 function pngEvidence(): ArrayBuffer {
 	const bytes = new Uint8Array(33);

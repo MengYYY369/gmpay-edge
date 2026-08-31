@@ -886,7 +886,7 @@ async function enqueuePaymentScans(
 	const defaultScanBefore = now - paymentScanIntervalMs;
 	const webhookRecoveryBefore = now - webhookRecoveryIntervalMs;
 	const activeOrders = await env.DB.prepare(
-		`SELECT o.id, ops.receiving_method_id
+		`SELECT o.id, ops.receiving_method_id, ops.asset_code
 		 FROM orders o INDEXED BY orders_payment_scan_idx
 		 CROSS JOIN order_payment_snapshots ops ON ops.order_id = o.id
 		 LEFT JOIN payment_ingresses source
@@ -914,11 +914,17 @@ async function enqueuePaymentScans(
 		.all<{
 			id: string;
 			receiving_method_id: string;
+			asset_code: string;
 		}>();
 	if (!activeOrders.results.length) return;
+	// Select the oldest due batch first; USDT priority must not starve other assets.
+	const orders = activeOrders.results.sort(
+		(left, right) =>
+			Number(right.asset_code === "USDT") - Number(left.asset_code === "USDT"),
+	);
 	try {
 		await env.PAYMENT_QUEUE.sendBatch(
-			activeOrders.results.map((order) => ({
+			orders.map((order) => ({
 				body: {
 					kind: "payment.scan",
 					version: 1,
@@ -936,15 +942,15 @@ async function enqueuePaymentScans(
 	}
 	// Advance fairness only after Queue accepted the complete batch.
 	await env.DB.batch(
-		activeOrders.results.map((order) =>
+		orders.map((order) =>
 			env.DB.prepare(
 				"UPDATE orders SET last_payment_scan_at = ? WHERE id = ?",
 			).bind(now, order.id),
 		),
 	);
 	return {
-		enqueued: activeOrders.results.length,
-		affectedRows: activeOrders.results.length,
+		enqueued: orders.length,
+		affectedRows: orders.length,
 	};
 }
 

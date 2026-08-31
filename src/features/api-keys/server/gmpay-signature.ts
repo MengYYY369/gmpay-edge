@@ -9,6 +9,7 @@ import { hasRequiredApiScope, parseApiScopes } from "../scopes";
 import { claimApiRateLimit } from "./rate-limit";
 
 export class GmpayRateLimitError extends Error {}
+export class AmbiguousSignatureParametersError extends Error {}
 
 const LAST_USED_WRITE_INTERVAL_MS = 10 * 60_000;
 
@@ -24,7 +25,18 @@ export function gmpaySignaturePayload(
 		.map(([key, value]) => [key, normalizeValue(value)] as const)
 		.filter(([, value]) => value !== "")
 		.sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
-		.map(([key, value]) => `${key}=${value}`);
+		.map(([key, value]) => {
+			// Legacy signatures have no escaping. Restrict the accepted language so
+			// a value cannot be reinterpreted as another signed parameter boundary.
+			if (
+				!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) ||
+				/&[A-Za-z_][A-Za-z0-9_]*=/.test(value)
+			)
+				throw new AmbiguousSignatureParametersError(
+					"Ambiguous signature parameters",
+				);
+			return `${key}=${value}`;
+		});
 	return pairs.join("&");
 }
 
@@ -58,10 +70,15 @@ export function verifyGmpaySignature(
 	signature: string,
 	excluded?: Set<string>,
 ) {
-	return constantTimeEqual(
-		signGmpayParameters(parameters, secret, excluded),
-		signature,
-	);
+	try {
+		return constantTimeEqual(
+			signGmpayParameters(parameters, secret, excluded),
+			signature,
+		);
+	} catch (error) {
+		if (error instanceof AmbiguousSignatureParametersError) return false;
+		throw error;
+	}
 }
 
 export function verifyEpaySignature(
@@ -70,10 +87,15 @@ export function verifyEpaySignature(
 	signature: string,
 	excluded?: Set<string>,
 ) {
-	return constantTimeEqual(
-		signEpayParameters(parameters, secret, excluded),
-		signature,
-	);
+	try {
+		return constantTimeEqual(
+			signEpayParameters(parameters, secret, excluded),
+			signature,
+		);
+	} catch (error) {
+		if (error instanceof AmbiguousSignatureParametersError) return false;
+		throw error;
+	}
 }
 
 export async function authenticateGmpayParameters(

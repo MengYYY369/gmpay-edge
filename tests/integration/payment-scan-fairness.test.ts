@@ -255,6 +255,71 @@ describe("payment scan scheduling fairness", () => {
 				.map((message) => message.body.orderId),
 		).toEqual(["order-recent-paid", "order-recent-expired"]);
 	});
+
+	it("dispatches USDT first within the oldest due batch without starving other assets", async () => {
+		const now = Date.now();
+		const pending = [
+			["priority-trx-a", "TRX"],
+			["priority-usdt-a", "USDT"],
+			["priority-trx-b", "TRX"],
+			["priority-usdt-b", "USDT"],
+			["priority-trx-c", "TRX"],
+			["priority-usdt-c", "USDT"],
+		] as const;
+		await db.batch([
+			db.prepare("UPDATE orders SET status = 'expired', updated_at = 0"),
+			db.prepare(
+				"UPDATE system_settings SET value = '4' WHERE key = 'payments.scan_batch_size'",
+			),
+			db
+				.prepare(
+					"INSERT INTO payment_assets (id, rail_code, code, symbol, kind, contract_address, decimals, created_at, updated_at) VALUES ('asset-usdt', 'tron', 'USDT', 'USDT', 'token', 'TUsdtContract', 6, ?, ?)",
+				)
+				.bind(now, now),
+			...pending.flatMap(([id, code], index) => {
+				const assetId = code === "USDT" ? "asset-usdt" : "asset";
+				return [
+					db
+						.prepare(
+							"INSERT INTO orders (id, external_order_id, status, amount_minor, currency, currency_decimals, payment_asset_id, received_amount_units, expires_at, created_at, updated_at) VALUES (?, ?, 'pending', '100', 'USD', 2, ?, '0', ?, ?, ?)",
+						)
+						.bind(id, id, assetId, now + 600_000, now + index, now + index),
+					paymentSnapshot(db, id, `TAddress${index}`, now + index, {
+						id: assetId,
+						code,
+					}),
+				];
+			}),
+		]);
+		const sendBatch = vi.fn().mockResolvedValue(undefined);
+		for (let run = 0; run < 2; run += 1) {
+			await db
+				.prepare(
+					"UPDATE system_settings SET value = '0' WHERE key = 'runtime.last_payment_scan_at'",
+				)
+				.run();
+			await runMaintenance(
+				{ DB: db, PAYMENT_QUEUE: { sendBatch } } as unknown as Env,
+				"*/1 * * * *",
+				dependencies,
+			);
+		}
+		expect(
+			sendBatch.mock.calls.map(([messages]) =>
+				messages.map(
+					(message: { body: { orderId: string } }) => message.body.orderId,
+				),
+			),
+		).toEqual([
+			[
+				"priority-usdt-a",
+				"priority-usdt-b",
+				"priority-trx-a",
+				"priority-trx-b",
+			],
+			["priority-usdt-c", "priority-trx-c"],
+		]);
+	});
 });
 
 function paymentSnapshot(
@@ -262,6 +327,7 @@ function paymentSnapshot(
 	orderId: string,
 	targetValue: string,
 	now: number,
+	asset = { id: "asset", code: "TRX" },
 ) {
 	return db
 		.prepare(
@@ -269,10 +335,10 @@ function paymentSnapshot(
 			 (order_id, receiving_method_id, receiving_method_name, rail_code, rail_kind,
 			  asset_id, asset_code, decimals, target_value, connection_id, adapter,
 			  required_confirmations, expected_amount_units, created_at)
-			 VALUES (?, 'method', 'Primary TRX', 'tron', 'chain', 'asset', 'TRX', 6,
+			 VALUES (?, 'method', 'Primary TRX', 'tron', 'chain', ?, ?, 6,
 			  ?, 'connection', 'tron', 1, '1000000', ?)`,
 		)
-		.bind(orderId, targetValue, now);
+		.bind(orderId, asset.id, asset.code, targetValue, now);
 }
 
 async function seed(db: D1Database) {

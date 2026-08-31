@@ -146,7 +146,7 @@ export async function retryPaymentProviderEvent(
 	const [claim] = await env.DB.batch([
 		env.DB.prepare(
 			`UPDATE inbound_provider_events SET status = 'received', attempt_count = 0,
-			 next_attempt_at = NULL, lease_until = NULL, last_error_code = NULL,
+			 next_attempt_at = NULL, lease_until = NULL, lease_token = NULL, last_error_code = NULL,
 			 processed_at = NULL, queued_at = NULL, updated_at = ?
 			 WHERE id = ? AND status = ?`,
 		).bind(now, eventId, event.status),

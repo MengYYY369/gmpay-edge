@@ -26,6 +26,7 @@ export async function recordLatePayment(
 	},
 	transaction: NormalizedTransaction,
 	policy: "review" | "reject",
+	commitGuard?: D1PreparedStatement,
 ) {
 	const db = env.DB;
 	const transactionId = paymentTransactionId(transaction);
@@ -77,6 +78,7 @@ export async function recordLatePayment(
 	}));
 	const paymentRowId = crypto.randomUUID();
 	const results = await db.batch([
+		...(commitGuard ? [commitGuard] : []),
 		db
 			.prepare(
 				`INSERT OR IGNORE INTO order_payments
@@ -173,7 +175,7 @@ export async function recordLatePayment(
 				.bind(id, eventId, endpoint.id, endpoint.api_key_id, now, now, eventId),
 		),
 	]);
-	if ((results[0]?.meta.changes ?? 0) !== 1) {
+	if ((results[commitGuard ? 1 : 0]?.meta.changes ?? 0) !== 1) {
 		const attributed = await db
 			.prepare(
 				"SELECT order_id FROM order_payments WHERE transaction_id = ? LIMIT 1",

@@ -150,34 +150,124 @@ export async function updateUser(
 ) {
 	if (!input.id)
 		throw new DomainError("user_id_required", 400, "Missing user id");
-	if (!input.enabled) {
-		await disableUserAtomically(db, input.id, input.currentUserId);
-	}
+	if (!input.enabled && input.id === input.currentUserId)
+		throw new DomainError(
+			"cannot_disable_self",
+			409,
+			"Cannot disable your own account",
+		);
 
 	const email = normalizeEmail(input.email);
-	const nextPassword = input.password;
+	const passwordHash = input.password
+		? await hashPassword(assertValidPassword(input.password))
+		: undefined;
 	const now = Date.now();
-	const updated = await db.$client
-		.prepare(`UPDATE users SET name = ?, email = ?,
-			${input.enabled ? "enabled = 1, disabled_at = NULL," : ""}
+	const client = db.$client;
+	try {
+		await client.batch([
+			client
+				.prepare(`UPDATE users SET name = ?, email = ?, enabled = ?, disabled_at = ?,
 			updated_at = CASE WHEN updated_at >= ? THEN updated_at + 1 ELSE ? END
 			WHERE id = ? AND NOT EXISTS (
 			 SELECT 1 FROM users other WHERE other.email = ? AND other.id <> ?
-			)`)
-		.bind(input.name.trim(), email, now, now, input.id, email, input.id)
-		.run();
-	if ((updated.meta.changes ?? 0) !== 1) {
-		const existing = await db.$client
-			.prepare("SELECT id FROM users WHERE id = ?")
-			.bind(input.id)
-			.first<{ id: string }>();
-		if (!existing)
+			) AND (
+			 NOT EXISTS (SELECT 1 FROM user_roles ur JOIN roles r ON r.id = ur.role_id
+			  WHERE ur.user_id = users.id AND r.name = 'root')
+			 OR EXISTS (SELECT 1 FROM user_roles ur JOIN roles r ON r.id = ur.role_id
+			  JOIN users actor ON actor.id = ur.user_id
+			  WHERE actor.id = ? AND actor.enabled = 1 AND r.name = 'root' AND r.enabled = 1)
+			) AND (? = 1 OR NOT EXISTS (
+			 SELECT 1 FROM user_roles ur JOIN roles r ON r.id = ur.role_id
+			 WHERE ur.user_id = users.id AND r.name = 'root'
+			) OR EXISTS (
+			 SELECT 1 FROM user_roles ur JOIN roles r ON r.id = ur.role_id
+			 JOIN users other ON other.id = ur.user_id
+			 WHERE r.name = 'root' AND r.enabled = 1 AND other.enabled = 1 AND other.id <> users.id
+			))`)
+				.bind(
+					input.name.trim(),
+					email,
+					input.enabled ? 1 : 0,
+					input.enabled ? null : now,
+					now,
+					now,
+					input.id,
+					email,
+					input.id,
+					input.currentUserId,
+					input.enabled ? 1 : 0,
+				),
+			// Abort the entire batch before credential writes if authorization or uniqueness changed.
+			client.prepare(
+				"SELECT CASE WHEN changes() = 1 THEN 1 ELSE json_extract('user update conflict', '$') END",
+			),
+			...(passwordHash
+				? [
+						client
+							.prepare(
+								"UPDATE accounts SET password = ?, updated_at = ? WHERE user_id = ? AND provider_id = 'credential'",
+							)
+							.bind(passwordHash, now, input.id),
+						client
+							.prepare(`INSERT INTO accounts (id, account_id, provider_id, user_id, password, created_at, updated_at)
+			 SELECT ?, ?, 'credential', ?, ?, ?, ? WHERE NOT EXISTS (
+			  SELECT 1 FROM accounts WHERE user_id = ? AND provider_id = 'credential')`)
+							.bind(
+								randomUUID(),
+								input.id,
+								input.id,
+								passwordHash,
+								now,
+								now,
+								input.id,
+							),
+					]
+				: []),
+			...(!input.enabled || passwordHash
+				? [
+						client
+							.prepare("DELETE FROM sessions WHERE user_id = ?")
+							.bind(input.id),
+					]
+				: []),
+		]);
+	} catch (error) {
+		const conflict = await client
+			.prepare(`SELECT
+		 EXISTS (SELECT 1 FROM user_roles ur JOIN roles r ON r.id = ur.role_id
+		  WHERE ur.user_id = users.id AND r.name = 'root') AS target_root,
+		 EXISTS (SELECT 1 FROM user_roles ur JOIN roles r ON r.id = ur.role_id
+		  JOIN users actor ON actor.id = ur.user_id
+		  WHERE actor.id = ? AND actor.enabled = 1 AND r.name = 'root' AND r.enabled = 1) AS actor_root,
+		 EXISTS (SELECT 1 FROM users other WHERE other.email = ? AND other.id <> users.id) AS email_used,
+		 EXISTS (SELECT 1 FROM user_roles ur JOIN roles r ON r.id = ur.role_id
+		  JOIN users other ON other.id = ur.user_id
+		  WHERE r.name = 'root' AND r.enabled = 1 AND other.enabled = 1 AND other.id <> users.id) AS other_root
+		 FROM users WHERE id = ?`)
+			.bind(input.currentUserId, email, input.id)
+			.first<{
+				target_root: number;
+				actor_root: number;
+				email_used: number;
+				other_root: number;
+			}>();
+		if (!conflict)
 			throw new DomainError("user_not_found", 404, "User not found");
-		throw new DomainError("email_in_use", 409, "Email is already used");
-	}
-
-	if (nextPassword !== undefined && nextPassword !== "") {
-		await resetUserPassword(db, { id: input.id, password: nextPassword });
+		if (conflict.target_root && !conflict.actor_root)
+			throw new DomainError(
+				"root_role_required",
+				403,
+				"Only a root user can manage root users",
+			);
+		if (conflict.email_used)
+			throw new DomainError("email_in_use", 409, "Email is already used");
+		if (!input.enabled && conflict.target_root && !conflict.other_root)
+			throw new DomainError(
+				"last_root_required",
+				409,
+				"Cannot disable the last enabled root user",
+			);
+		throw error;
 	}
 
 	return { id: input.id };

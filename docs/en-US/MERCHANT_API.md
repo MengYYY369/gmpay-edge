@@ -50,6 +50,14 @@ state such as `confirming`, `partially_paid`, or `overpaid`.
 6. Calculate HMAC-SHA256 using the API Secret as the HMAC key.
 7. Encode the result as 64-character lowercase hexadecimal text.
 
+The legacy format is accepted only when its parameter boundaries are unambiguous.
+Signed field names must match `[A-Za-z_][A-Za-z0-9_]*`; values must not contain
+`&` followed by such a field name and `=`. Ambiguous requests fail authentication
+with `401`, including callback URLs containing multiple `&key=value` query
+parameters. Use a callback path or a single opaque query parameter instead.
+Literal `&` or `=` without a field-boundary pattern remains supported. These
+rules also apply to EPay; unambiguous requests retain their existing signatures.
+
 ```ts
 import { hmac } from "@noble/hashes/hmac.js";
 import { sha256 } from "@noble/hashes/sha2.js";
@@ -65,7 +73,12 @@ const parameters = {
 const source = Object.entries(parameters)
   .filter(([, value]) => value !== "")
   .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
-  .map(([key, value]) => `${key}=${value}`)
+  .map(([key, value]) => {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || /&[A-Za-z_][A-Za-z0-9_]*=/.test(String(value))) {
+      throw new Error("ambiguous signature parameters");
+    }
+    return `${key}=${value}`;
+  })
   .join("&");
 const signature = bytesToHex(
   hmac(
@@ -112,6 +125,13 @@ plain text `ok` with HTTP 200. Any other response is retried.
 Persist the order/event identity before returning `ok`, because automatic and
 manual delivery retries can send the same logical status more than once.
 
+Status, order amount, payable asset amount, and asset code come from the persisted
+event snapshot, not the order's later state. Retrying a partial-payment event
+after full payment still reports its original waiting status. `actual_amount`
+continues to mean the payable asset amount, not cumulative receipts; internal
+event `payment.receivedAmountUnits` records cumulative receipts at event time.
+Credential rotation may change the signature, but not the event's business data.
+
 This Bun handler verifies a received JSON payload using the exact same
 canonicalization rule:
 
@@ -126,7 +146,12 @@ const received = String(payload.signature ?? "");
 const source = Object.entries(payload)
   .filter(([key, value]) => key !== "signature" && value != null && value !== "")
   .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
-  .map(([key, value]) => `${key}=${value}`)
+  .map(([key, value]) => {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || /&[A-Za-z_][A-Za-z0-9_]*=/.test(String(value))) {
+      throw new Error("ambiguous signature parameters");
+    }
+    return `${key}=${value}`;
+  })
   .join("&");
 const expected = bytesToHex(hmac(
   sha256,

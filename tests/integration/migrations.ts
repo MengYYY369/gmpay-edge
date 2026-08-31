@@ -1,9 +1,12 @@
 import { readdir, readFile } from "node:fs/promises";
 
-export async function applyMigrations(database: D1Database) {
+export async function applyMigrations(database: D1Database, through?: number) {
 	const directory = new URL("../../drizzle/", import.meta.url);
 	const files = (await readdir(directory))
 		.filter((name) => /^\d+_.+\.sql$/.test(name))
+		.filter(
+			(name) => through === undefined || Number(name.slice(0, 4)) <= through,
+		)
 		.sort();
 	for (const file of files) {
 		const migration = await readFile(new URL(file, directory), "utf8");

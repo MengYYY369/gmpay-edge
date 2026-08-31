@@ -1,5 +1,9 @@
 import type { OrderStatus } from "#/features/orders/schema";
 import { assertTransition } from "#/features/orders/state-machine";
+import {
+	type PaymentReviewApproval,
+	paymentReviewApprovalStatements,
+} from "#/features/payment-reviews/server/approval";
 import { paymentTargetAddressMatches } from "#/features/payments/server/attribution";
 import {
 	displayOrderAmounts,
@@ -29,7 +33,12 @@ export async function recordPaymentTransaction(
 	orderId: string,
 	transaction: NormalizedTransaction,
 	runtime?: RuntimeConfig,
+	commit?: {
+		reviewApproval?: PaymentReviewApproval;
+		guard?: D1PreparedStatement;
+	},
 ): Promise<{ duplicate: boolean; status: OrderStatus }> {
+	const reviewApproval = commit?.reviewApproval;
 	const storedOrder = await env.DB.prepare(
 		`SELECT o.id, o.external_order_id, o.status, o.amount_minor,
 		 o.currency, o.currency_decimals, o.received_amount_units, o.expires_at, o.version,
@@ -83,7 +92,10 @@ export async function recordPaymentTransaction(
 			"Transaction does not match the payment target",
 		);
 	}
-	if (order.status === "expired" || order.status === "cancelled") {
+	if (
+		!reviewApproval &&
+		(order.status === "expired" || order.status === "cancelled")
+	) {
 		const policy = (await loadOperationalSettings(env.DB)).latePaymentPolicy;
 		if (policy !== "accept") {
 			return recordLatePayment(
@@ -91,6 +103,7 @@ export async function recordPaymentTransaction(
 				{ ...order, paymentAmount: order.paymentAmount },
 				transaction,
 				policy,
+				commit?.guard,
 			);
 		}
 	}
@@ -154,8 +167,16 @@ export async function recordPaymentTransaction(
 		existingPayment.confirmations === transaction.confirmations &&
 		existingPayment.status === paymentStatus &&
 		existingPayment.block_hash === transaction.blockHash &&
-		existingPayment.blockchain_status === blockchainStatus
+		existingPayment.blockchain_status === blockchainStatus &&
+		!(reviewApproval && ["expired", "cancelled"].includes(order.status))
 	) {
+		if (reviewApproval || commit?.guard)
+			await env.DB.batch([
+				...(commit?.guard ? [commit.guard] : []),
+				...(reviewApproval
+					? paymentReviewApprovalStatements(env.DB, orderId, reviewApproval)
+					: []),
+			]);
 		return { duplicate: true, status: order.status };
 	}
 
@@ -229,6 +250,7 @@ export async function recordPaymentTransaction(
 
 	const paymentRowId = existingPayment?.id ?? crypto.randomUUID();
 	const statements = [
+		...(commit?.guard ? [commit.guard] : []),
 		env.DB.prepare(
 			`INSERT INTO blockchain_transactions (id, network, tx_hash, event_index, from_address, to_address, asset_code, amount_units, block_number, block_hash, confirmations, status, observed_at, created_at, updated_at)
 			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -323,10 +345,14 @@ export async function recordPaymentTransaction(
 				"INSERT INTO webhook_deliveries (id, event_id, order_id, api_key_id, status, attempt_count, created_at, updated_at) VALUES (?, ?, ?, ?, 'queued', 0, ?, ?)",
 			).bind(id, eventId, orderId, endpoint.api_key_id, now, now),
 		),
+		...(reviewApproval
+			? paymentReviewApprovalStatements(env.DB, orderId, reviewApproval, now)
+			: []),
 	];
 	try {
 		await env.DB.batch(statements);
 	} catch (error) {
+		if (reviewApproval || commit?.guard) throw error;
 		const attributed = await env.DB.prepare(
 			`SELECT op.order_id, op.amount_units, op.confirmations, op.status,
 			 bt.block_hash, bt.status AS blockchain_status, o.status AS order_status

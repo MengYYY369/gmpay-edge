@@ -43,7 +43,7 @@ export async function recoverProviderEventOutbox(
 ) {
 	const batchLimit = Math.max(1, Math.min(limit, 100));
 	const leaseRecovery = await env.DB.prepare(
-		`UPDATE inbound_provider_events SET status = 'failed', lease_until = NULL,
+		`UPDATE inbound_provider_events SET status = 'failed', lease_until = NULL, lease_token = NULL,
 		 next_attempt_at = NULL,
 		 last_error_code = COALESCE(last_error_code, 'processing_lease_expired'),
 		 updated_at = ? WHERE id IN (

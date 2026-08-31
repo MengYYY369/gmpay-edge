@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { Miniflare } from "miniflare";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { signEpayParameters } from "#/features/api-keys/server/gmpay-signature";
@@ -44,6 +45,40 @@ describe("EPay compatibility HTTP handler", () => {
 	});
 
 	afterAll(async () => miniflare.dispose());
+
+	it("rejects a legacy-valid ambiguous signature before order creation", async () => {
+		const parameters = {
+			pid,
+			money: "12.50",
+			out_trade_no: "AMBIGUOUS-CALLBACK",
+			name: "item",
+			notify_url:
+				"https://receiver.example/hook&notify_url=https://merchant.example/hook",
+		};
+		const canonical = Object.entries(parameters)
+			.sort(([a], [b]) => a.localeCompare(b))
+			.map(([key, value]) => `${key}=${value}`)
+			.join("&");
+		const sign = createHash("md5")
+			.update(canonical + secret)
+			.digest("hex");
+		const response = await handleEpayCreateRequest(
+			new Request("https://pay.example/submit.php", {
+				method: "POST",
+				headers: { "content-type": "application/x-www-form-urlencoded" },
+				body: new URLSearchParams({ ...parameters, sign, sign_type: "MD5" }),
+			}),
+			{ DB: db } as Env,
+		);
+		expect(response.status).toBe(401);
+		expect(
+			await db
+				.prepare(
+					"SELECT COUNT(*) AS count FROM orders WHERE external_order_id = 'AMBIGUOUS-CALLBACK'",
+				)
+				.first(),
+		).toEqual({ count: 0 });
+	});
 
 	it("rejects an oversized POST body before authentication", async () => {
 		const response = await handleEpayCreateRequest(

@@ -20,6 +20,7 @@ describe("checkout polling", () => {
 		expect(route).toContain(
 			"order: await getCheckoutOrderFn({ data: { orderId: params.orderId } })",
 		);
+		expect(route).toContain("key={orderId}");
 		expect(page).toContain(
 			"const [order, setOrder] = useState<CheckoutOrder | null>(initialOrder)",
 		);

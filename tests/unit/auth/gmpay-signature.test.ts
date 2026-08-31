@@ -1,5 +1,7 @@
+import { createHash, createHmac } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
+	AmbiguousSignatureParametersError,
 	gmpaySignaturePayload,
 	signEpayParameters,
 	signGmpayParameters,
@@ -72,5 +74,52 @@ describe("GMPay HMAC-SHA256 parameter signatures", () => {
 		expect(verifyGmpaySignature(parameters, "merchant-secret", signature)).toBe(
 			false,
 		);
+	});
+
+	it("rejects both interpretations of the legacy callback-destination collision", () => {
+		const original = {
+			pid: "1000",
+			money: "12.50",
+			out_trade_no: "SECURITY-1",
+			name: "item&notify_url=https://receiver.example/hook",
+			notify_url: "https://merchant.example/hook",
+		};
+		const altered = {
+			...original,
+			name: "item",
+			notify_url:
+				"https://receiver.example/hook&notify_url=https://merchant.example/hook",
+		};
+		const legacy = (parameters: object) =>
+			Object.entries(parameters)
+				.sort(([a], [b]) => a.localeCompare(b))
+				.map(([key, value]) => `${key}=${value}`)
+				.join("&");
+		expect(legacy(original)).toBe(legacy(altered));
+		const epay = createHash("md5")
+			.update(`${legacy(original)}secret`)
+			.digest("hex");
+		const gmpay = createHmac("sha256", "secret")
+			.update(legacy(original))
+			.digest("hex");
+		for (const parameters of [original, altered]) {
+			expect(verifyEpaySignature(parameters, "secret", epay)).toBe(false);
+			expect(verifyGmpaySignature(parameters, "secret", gmpay)).toBe(false);
+			expect(() => signEpayParameters(parameters, "secret")).toThrow(
+				AmbiguousSignatureParametersError,
+			);
+		}
+	});
+
+	it("allows literal ampersands and equals without field boundaries, but rejects injected keys", () => {
+		const parameters = {
+			name: "Tea & Coffee = good",
+			notify_url: "https://merchant.example/hook?source=shop",
+		};
+		const signature = signGmpayParameters(parameters, "secret");
+		expect(verifyGmpaySignature(parameters, "secret", signature)).toBe(true);
+		expect(
+			verifyGmpaySignature({ "a=b&c": "value" }, "secret", signature),
+		).toBe(false);
 	});
 });

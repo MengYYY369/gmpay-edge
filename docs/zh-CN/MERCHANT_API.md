@@ -38,6 +38,12 @@ POST /payments/gmpay/v1/order/create-transaction
 6. 使用 API Secret 作为 HMAC Key 计算 HMAC-SHA256；
 7. 将结果编码为 64 位小写十六进制文本。
 
+旧版格式只接受参数边界无歧义的输入。参与签名的字段名必须匹配
+`[A-Za-z_][A-Za-z0-9_]*`；值中不得包含 `&` 后接这类字段名和 `=` 的片段。
+歧义请求会以 `401` 拒绝验签，包括含多个 `&key=value` 查询参数的回调 URL；
+请使用回调路径或单个不透明查询参数。没有字段边界模式的普通 `&`、`=` 仍可使用。
+EPay 同样遵循此限制，无歧义请求的签名结果保持不变。
+
 ```ts
 import { hmac } from "@noble/hashes/hmac.js";
 import { sha256 } from "@noble/hashes/sha2.js";
@@ -53,7 +59,12 @@ const parameters = {
 const source = Object.entries(parameters)
   .filter(([, value]) => value !== "")
   .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
-  .map(([key, value]) => `${key}=${value}`)
+  .map(([key, value]) => {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || /&[A-Za-z_][A-Za-z0-9_]*=/.test(String(value))) {
+      throw new Error("ambiguous signature parameters");
+    }
+    return `${key}=${value}`;
+  })
   .join("&");
 const signature = bytesToHex(
   hmac(
@@ -91,6 +102,11 @@ GET /payments/gmpay/v1/order/query?pid=100000000001&trade_id=<trade-id>&signatur
 
 GMPay Edge 向订单不可变的 `notify_url` POST JSON。载荷使用 epusdt 兼容的整数状态（`1` 等待支付、`2` 支付成功、`3` 已关闭），并包含 `pid`、`trade_id`、`order_id`、订单/支付金额、收款目标、Token、交易 ID、状态和 `signature`。使用相同排序参数 HMAC-SHA256 算法验签，成功后返回 HTTP 200 与纯文本 `ok`，其他响应都会重试。
 
+状态、订单金额、应付资产金额和资产代码取自持久化的事件快照，而不是订单的后续状态。
+订单全额付款后重试旧的部分付款事件，仍报告原来的等待状态。`actual_amount` 继续表示
+应付资产金额，不表示累计实收；内部事件的 `payment.receivedAmountUnits` 记录事件发生时的
+累计实收。密钥轮换可能改变签名，但不会改变事件业务数据。
+
 ```ts
 import { timingSafeEqual } from "node:crypto";
 import { hmac } from "@noble/hashes/hmac.js";
@@ -102,7 +118,12 @@ const received = String(payload.signature ?? "");
 const source = Object.entries(payload)
   .filter(([key, value]) => key !== "signature" && value != null && value !== "")
   .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
-  .map(([key, value]) => `${key}=${value}`)
+  .map(([key, value]) => {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || /&[A-Za-z_][A-Za-z0-9_]*=/.test(String(value))) {
+      throw new Error("ambiguous signature parameters");
+    }
+    return `${key}=${value}`;
+  })
   .join("&");
 const expected = bytesToHex(hmac(
   sha256,

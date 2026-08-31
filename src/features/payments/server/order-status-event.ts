@@ -18,6 +18,25 @@ export async function emitOrderStatusEvent(
 	status: OrderStatus,
 	deduplicationKey: string,
 ): Promise<boolean> {
+	const event = await prepareOrderStatusEvent(
+		env,
+		orderId,
+		status,
+		deduplicationKey,
+	);
+	const results = await env.DB.batch(event.statements);
+	if ((results[0]?.meta.changes ?? 0) !== 1) return false;
+	await event.dispatch();
+	return true;
+}
+
+/** Prepare the outbox before mutation so callers can commit it with the order transition. */
+export async function prepareOrderStatusEvent(
+	env: PaymentRuntime,
+	orderId: string,
+	status: OrderStatus,
+	deduplicationKey: string,
+) {
 	const storedOrder = await env.DB.prepare(
 		`SELECT o.external_order_id, o.amount_minor, o.currency, o.currency_decimals,
 		 o.received_amount_units, ops.expected_amount_units, ops.decimals,
@@ -69,7 +88,7 @@ export async function emitOrderStatusEvent(
 		id: crypto.randomUUID(),
 		endpoint,
 	}));
-	const results = await env.DB.batch([
+	const statements = [
 		env.DB.prepare(
 			"INSERT OR IGNORE INTO webhook_events (id, order_id, type, deduplication_key, payload, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
 		).bind(
@@ -87,14 +106,16 @@ export async function emitOrderStatusEvent(
 				 SELECT ?, ?, ?, ?, 'queued', 0, ?, ? WHERE EXISTS (SELECT 1 FROM webhook_events WHERE id = ?)`,
 			).bind(id, eventId, orderId, endpoint.api_key_id, now, now, eventId),
 		),
-	]);
-	if ((results[0]?.meta.changes ?? 0) !== 1) return false;
-	await dispatchPaymentNotifications(
-		env,
-		eventId,
-		payload,
-		deliveries,
-		eventType,
-	);
-	return true;
+	];
+	return {
+		statements,
+		dispatch: () =>
+			dispatchPaymentNotifications(
+				env,
+				eventId,
+				payload,
+				deliveries,
+				eventType,
+			),
+	};
 }

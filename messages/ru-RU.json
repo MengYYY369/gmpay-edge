@@ -250,7 +250,7 @@
   "admin_users_error_cannot_disable_self": "Нельзя отключить собственную учётную запись",
   "admin_users_error_cannot_delete_self": "Нельзя удалить собственную учётную запись",
 	"admin_users_error_last_root_required": "Требуется хотя бы один активный пользователь root",
-	"admin_users_error_root_role_required": "Только пользователь root может изменять состав root",
+	"admin_users_error_root_role_required": "Только пользователь root может управлять пользователями root и назначением их ролей",
   "admin_users_error_role_unavailable": "Одна или несколько выбранных ролей недоступны",
   "admin_users_error_own_roles_required": "Нельзя удалить все роли собственной учётной записи",
   "admin_users_toggleLabel": "Переключить {email}",
