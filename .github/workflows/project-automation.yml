@@ -7,8 +7,8 @@ on:
         description: Verify webhook delivery without dispatching automation
         type: boolean
         default: false
-  schedule:
-    - cron: "0 */6 * * *"
+  # schedule:
+  #   - cron: "0 */6 * * *"
   issues:
     types: [opened, edited, reopened, labeled]
   issue_comment:
